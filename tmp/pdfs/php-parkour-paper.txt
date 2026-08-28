@@ -1,0 +1,787 @@
+          Perceptive Humanoid Parkour: Chaining
+        Dynamic Human Skills via Motion Matching
+       Zhen Wu*1 , Xiaoyu Huang*1,2 , Lujie Yang*1 , Yuanhang Zhang1,3 , Koushil Sreenath1,2 , Xi Chen1 ,
+Pieter Abbeel†1,2 , Rocky Duan†1 , Angjoo Kanazawa†1,2 , Carmelo Sferrazza†1 , Guanya Shi†1,3 , C. Karen Liu†1,4
+           1 Amazon FAR, 2 UC Berkeley, 3 CMU, 4 Stanford University, † Amazon FAR team co-lead
+
+                               Page: https://php-parkour.github.io/
+
+ (a)                                         ～3 m/s                          (b)
+
+
+
+
+                                                                                                                1.25 m
+
+
+
+
+ (c)                    ～3 m/s                            (d)
+
+
+
+
+                                                                             60 seconds
+                                                                                          60 seconds
+
+
+Fig. 1: Perceptive Humanoid Parkour (PHP) enables a Unitree G1 humanoid robot to execute highly dynamic, long-horizon
+parkour behaviors using onboard perception. By composing various agile human skills via motion matching and a teacher-
+student training pipeline, we train a single multi-skill visuomotor policy capable of complex contact-rich maneuvers including
+(a) cat-vaulting over a short obstacle followed by dash-vaulting over a higher obstacle at approximately 3 m/s, (b) climbing
+onto a 1.25 m (96% of robot height) wall, and rolling down, (c) speed-vaulting over an obstacle at approximately 3 m/s, and
+(d) a 60-second continuous traversal of a complex parkour course with autonomous skill selection and seamless transitions.
+   Abstract—While recent advances in humanoid locomotion have       vault or roll off obstacles of varying geometries and heights. We
+achieved stable walking on varied terrains, capturing the agility   validate our framework with extensive real-world experiments
+and adaptivity of highly dynamic human motions remains an           on a Unitree G1 humanoid robot, demonstrating highly dynamic
+open challenge. In particular, agile parkour in complex environ-    parkour skills such as climbing tall obstacles up to 1.25 m (96%
+ments demands not only low-level robustness, but also human-        robot height), as well as long-horizon multi-obstacle traversal
+like motion expressiveness, long-horizon skill composition, and     with closed-loop adaptation to real-time obstacle perturbations.
+perception-driven decision-making. In this paper, we present
+Perceptive Humanoid Parkour (PHP), a modular framework that                               I. I NTRODUCTION
+enables humanoid robots to autonomously perform long-horizon,
+vision-based parkour across challenging obstacle courses. Our          Achieving the agility and adaptivity of human motion
+approach first leverages motion matching, formulated as nearest-    in traversing complex terrains remains a central challenge
+neighbor search in a feature space, to compose retargeted           for humanoid robotics. Humans traverse challenging terrains
+atomic human skills into long-horizon kinematic trajectories.
+This framework enables the flexible composition and smooth          of drastically different dimensions by rapidly selecting and
+transition of complex skill chains while preserving the elegance    chaining dynamic whole-body skills based on perceived envi-
+and fluidity of dynamic human motions. Next, we train motion-       ronmental context. Our goal is to endow humanoids with the
+tracking reinforcement learning (RL) expert policies for these      same capability. In this work, we study parkour as a concrete,
+composed motions, and distill them into a single depth-based,       self-contained testbed for this broader objective.
+multi-skill student policy, using a combination of DAgger and RL.
+Crucially, the combination of perception and skill composition         Parkour highlights several core challenges. First, the robot
+enables autonomous, context-aware decision-making: using only       must perform highly dynamic and contact-rich skills, such as
+onboard depth sensing and a discrete 2D velocity command,           climbing walls around or above its body height or vaulting
+the robot selects and executes whether to step over, climb onto,    over obstacles within fractions of a second. This requires
+effective control in the humanoid’s vast, high-dimensional           among behaviors, such as stepping, climbing, and vaulting,
+action space. Second, these skills must be tightly coupled           using onboard depth sensing.
+with exteroception, such as vision, to enable adaptation to            Our contributions are threefold:
+environmental variation and rapid reaction to unexpected per-          1) An efficient kinematic skill composition pipeline that
+turbations. Furthermore, to generalize beyond isolated ma-                 chains retargeted human motions into diverse long-
+neuvers and traverse complex obstacle courses, the robot                   horizon trajectories via motion matching.
+must consolidate many highly dynamic skills into a single              2) A scalable training framework that distills multiple ex-
+visuomotor policy, which becomes increasingly difficult as the             perts into a single visuomotor policy, enabling seamless
+number and diversity of required skills grow.                              transitions across diverse parkour skills.
+   Human motion data has become essential for learning highly          3) Successful zero-shot sim-to-real transfer of depth-based
+dynamic humanoid behaviors. Prior work [20, 43] has used hu-               policies on a physical humanoid robot, achieving highly
+man motion data to successfully demonstrate highly dynamic                 dynamic parkour over various obstacles.
+skills such as jumping, rolling, and flipping. However, highly
+dynamic motion data is inherently scarce: capturing fast,                                 II. R ELATED W ORKS
+contact-rich maneuvers typically requires specialized setups
+                                                                       The goal of parkour is to traverse challenging terrains
+and careful curation, so datasets often include only one or
+                                                                     agilely by perceiving, reacting, and chaining skills for different
+two demonstrations per skill, each lasting just a few seconds.
+                                                                     obstacles. We review related work in these areas.
+This scarcity is not unique to parkour but applies broadly to all
+dynamic human skills. Yet long-horizon tasks such as parkour         A. Perceptive Terrain Traversal for Legged Robots
+require both rich within-skill variation that adapts to how the
+robot approaches an obstacle, and smooth, natural transitions           While blind locomotion has achieved strong robustness
+between multiple skills across complex courses.                      on moderately structured terrains such as slopes and stairs
+   To address this challenge, we adopt motion matching [5, 9]        on quadrupedal robots [19, 28, 21, 18], perception enables
+as a simple yet powerful mechanism. Motion matching synthe-          traversal of substantially more challenging terrains [26]. In par-
+sizes long-horizon motion by retrieving and stitching motion         ticular, perception is critical for handling sparse footholds [1,
+fragments via nearest-neighbor search in a designed feature          44, 46] and discontinuous terrain such as gaps and tall ob-
+space. Crucially, this process densifies a sparse motion library     stacles [1, 45]. Building on these capabilities, prior work has
+by producing diverse transitions across approach distances,          enabled quadrupeds to traverse parkour-style terrain courses
+headings, and timing, while preserving the realism of captured       with consecutive gap jumps and obstacle climbs [8, 23, 13, 33].
+motions. In our framework, motion matching enables the gen-             However, translating the success on quadrupeds to hu-
+eration of a large set of obstacle-adaptive, long-horizon kine-      manoids remains challenging. While quadrupedal parkour
+matic reference trajectories for downstream policy learning.         skills can often be trained from scratch via reward shaping, this
+   Learning a visuomotor policy that executes dozens of highly       approach scales poorly to humanoids due to high-dimensional
+dynamic skills requires perceptive inputs that can be efficiently    whole-body control. As a result, prior perceptive humanoid
+simulated and reliably transferred to the real world. To improve     locomotion has primarily focused on lower-dynamic terrain
+training efficiency, prior work typically trains privileged state-   traversal, including stair climbing [22], walking on sparse
+based experts in simulation and distills them into vision-based      terrain [37, 12, 2], and stepping onto low platforms [52].
+students using DAgger [32]. However, for humanoid parkour,           Moreover, to reduce exploration difficulty in RL when training
+pure imitation loss is limited: compounding errors can quickly       from scratch, most works adopt a teacher-student pipeline
+derail highly dynamic skills such as climbing and vaulting. To       where an expert is trained with privileged states and a vision-
+address this, we augment distillation with an RL objective that      based student is distilled via DAgger [8, 33]. We follow this
+provides task-level corrective feedback, steering the student        paradigm but find pure DAgger insufficient for highly dynamic
+towards successful traversal and yielding a scalable recipe          humanoid skills, and therefore augment it with RL to improve
+across many skills.                                                  distillation performance. Note that this differs from the fine-
+   To this end, we present Perceptive Humanoid Parkour               tuning stage in [33], which primarily focuses on adapting an
+(PHP), a modular framework that integrates human motion              already performant DAgger-distilled policy to unseen terrains.
+priors, long-horizon skill composition, and perceptive control.
+We first retarget human motion data into a library of robot-         B. Humanoid Skill Chaining with Human Motion Data
+compatible atomic skills using OmniRetarget [43]. We then               Using human motion references effectively reduces reward
+employ motion matching to compose these skills into a diverse        engineering and produces agile, natural humanoid behav-
+set of long-horizon kinematic trajectories. These composed           iors [20, 43, 48, 29, 40, 7], but comes at the cost of more
+trajectories preserve agility and smooth transitions, while          challenging skill chaining. With reward shaping, quadrupeds
+providing sufficient variation to learn adaptive long-horizon        can learn transitions either implicitly by a single policy [8,
+behaviors. We then train motion-tracking expert policies and         23, 12, 2], or through specialist switching or distillation using
+distill them into a single depth-conditioned, multi-skill policy     a shared locomotion state [13, 51, 6, 33]. In contrast, human
+that enables the robot to autonomously select and transition         motion data spans heterogeneous styles that can lie in disjoint
+         Skill Composition                                Teacher Training                   Student Training              Zero-Shot Sim2Real
+     Locomotion               Atomic Parkour Skills    Kinematic                              Multiple Teachers
+                                                        Parkour
+                                                                                        𝜋"        𝜋$     𝜋%      …    𝜋&
+                                                      Trajectories
+
+
+                   Skill Composition                                                               DAgger + RL
+                Motion Matching                              RL Motion Tracking
+         ll 1
+      Ski                     Nearest Neighbor                                                     Proprioception
+                                        Search                  Proprioception
+                                                                                                   Depth Image
+                                              2                 Heightmap
+                                          ill
+                                       Sk                                                          Velocity Command
+            Search Window                                       Reference Motion
+
+    Long-Horizon Parkour Trajectories                                                   Student
+                                                         Teacher
+
+                                                           𝜋!
+
+
+
+Fig. 2: Perceptive Humanoid Parkour overview. Atomic parkour skills are composed into long-horizon kinematic reference
+trajectories via motion matching. Single-skill teacher policies are trained with privileged information using RL-based motion
+tracking. Multiple teachers are distilled into a single depth-based student policy using a hybrid DAgger and RL objective. This
+scalable recipe enables zero-shot sim-to-real transfer onto a physical humanoid robot that adaptively traverses through complex
+terrains by autonomously executing highly agile parkour skills using onboard perception.
+
+regions of the state space, making long-horizon composition                          III. A DAPTIVE AND AGILE L ONG -H ORIZON PARKOUR
+a fundamental challenge.
+                                                                                   A. Overview
+   AMP [31] addresses this challenge by training a single
+policy to learn a distribution of skills, allowing transitions                       The objective of this work is to enable a humanoid robot
+to implicitly emerge from RL exploration, but replaces hand-                       to execute agile parkour behaviors over multiple obstacles
+crafted rewards with a learned style reward from motion                            autonomously using onboard perception. We first generate
+data. While promising in animation and quadrupeds [42, 39],                        long-horizon kinematic reference motions via motion match-
+humanoid hardware demonstrations have so far been limited                          ing by composing locomotion with atomic parkour skills.
+to less agile skills such as walking, stepping, and box lift-                      We then train motion-tracking expert policies with privileged
+ing [50, 35, 38].                                                                  observations in simulation, and finally distill them into a depth-
+   To address the transition problem more explicitly, another                      based student policy using DAgger in combination with a
+line of work generates intermediate kinematic trajectories us-                     PPO objective, enabling zero-shot sim-to-real deployment. An
+ing learned kinematics models (e.g., MDM [36]) and executes                        overview of the system is shown in Fig. 2.
+them with tracking controllers (e.g., DeepMimic [30]). These
+kinematics models can provide smooth transition references at                      B. Skill Composition via Motion Matching
+test time [41, 24, 10, 47] or training time [16], but their tra-                      Motion matching [5, 9] is a technique originally developed
+jectory quality degrades significantly in the low-data regimes                     in the video game industry for interactive character control,
+common in parkour. This often requires either costly iterative                     where motion is generated online by selecting, at each frame
+co-training [41] to recover usable motion or receding-horizon                      or transition point, the animation frame from a large database
+replanning [15], which is costly with perception in real time.                     whose motion features best match the current pose and desired
+   In contrast, we adopt motion matching [5, 14] as a sim-                         future behavior. In this work, we adopt motion matching as an
+ple yet highly effective source of kinematic references for                        offline motion synthesis module for composing scarce atomic
+humanoid skill chaining. Motion matching has been widely                           parkour skills with locomotion into long-horizon references.
+adopted in video games and character animation for its                                1) Basic motion matching: We briefly summarize the stan-
+simplicity and practical controllability, while still producing                    dard motion matching formulation; implementation details are
+high-quality motion [5, 11]. While a mature technique in                           provided in Appx. A. Let a motion database consist of N
+animation [3], it has so far been applied in robotics only                         frames, where each frame i is associated with a kinematic
+to relatively simple quadruped behaviors [17]. In this work,                       pose qi and a matching feature vector xi derived from
+we show that it is a powerful tool for chaining dynamic                            qi . Following [14], xi concatenates (i) short-horizon future
+and expressive human skills over difficult terrain courses for                     trajectory positions and facing directions, (ii) local foot joint
+humanoid robots, substantially improving both success rate                         positions and velocities, and (iii) root velocity, all expressed
+and transition smoothness.                                                         in the character’s local coordinate frame.
+    When generating transitions, given the current character
+state and a desired 2D velocity command, we first convert the
+command into a desired future trajectory and facing directions,
+and then concatenate these with foot positions, velocities and                                                            right leg
+root velocities from the current state to form the query feature                                               4.8 m
+x̂t . The best matching frame is then retrieved via
+                   i⋆t = arg min ∥x̂t − xi ∥2 ,                (1)
+                             i∈Ct
+
+where Ct denotes the search window of the user-specified                                                                            left leg
+                                                                       (a)                                   3.9 m
+upcoming skill. This nearest-neighbor search is performed pe-
+riodically (every M frames) or when the commanded velocity                                      1 m/s
+changes significantly. After selecting i⋆t , the system transitions
+playback to frame i⋆t and plays forward from that frame until
+the next search is performed. A short blending window is                                                                    2 m/s
+applied around transitions to avoid discontinuities.
+   2) Long-Horizon Parkour Trajectory Synthesis: Since lo-
+comotion (walking and running) serves as a ubiquitous and
+                                                                       (b)
+naturally reusable connector between more challenging park-
+our skills, we generate long-horizon parkour trajectories by                                                                 20°, 1.84 m
+                                                                                            0°, 0.95 m
+composing locomotion segments with short parkour skill
+clips in the form of Locomotion → Parkour Skill →
+Locomotion. By routing all skills through a shared locomo-
+tion manifold, this formulation enables consistent transitions
+across heterogeneous skills without requiring specific, hand-
+captured transitions between every possible skill pair, and            (c)
+supports scalable composition of long-horizon behaviors.              Fig. 3: Diverse variations of composed parkour skills
+   We maintain (i) a locomotion database Dloco =
+                                                                      synthesized via motion matching. (a) Different approach
+{(xloco     loco
+     i , qi )} and (ii) a set of skill databases {Dk }, one           distances trigger varying stride phases and entry poses. (b)
+for each parkour skill k. Each skill clip is paired with a
+                                                                      Diverse locomotion speeds, directions, and durations. (c) Ran-
+corresponding terrain asset. For every atomic skill clip in Dk ,
+                                                                      domized terrain poses and shapes.
+we manually annotate the skill start and end frame indices
+(sk , ek ). We additionally define a pre-skill entry window of
+skill-dependent length Hk :                                              Dataset construction. We synthesize long-horizon refer-
+                                                                      ence trajectories by rolling out the motion-matching compo-
+                     Ek := [ sk − Hk , sk ],                   (2)    sition procedure as follows. As visualized in Fig. 3(b), each
+which corresponds to the approach phase right before the              trajectory starts from a standing state and enters a locomotion
+main contact-rich maneuver, where transitioning into the clip         phase driven by 2D velocity commands sampled from two
+is meaningful. For example, for a vault clip, Ek captures the         speed levels (low (1m/s), high (2m/s)) and five turning direc-
+final approach steps before takeoff, avoiding transitions outside     tions (−90◦ , −45◦ , 0◦ , 45◦ , 90◦ ). We then transition into skill
+the intended approach phase.                                          k and replay the skill clip sequentially; during the skill, we set
+   Locomotion mode. During locomotion, we run standard                the command to go straight (0◦ ) while keeping the same speed
+motion matching via Eq.(1) with Ct = Dloco , and advance              level as the preceding locomotion segment. After reaching
+playback sequentially as described in Sec. III-B1.                    the annotated end frame ek , we return to locomotion and
+   Locomotion → Skill transition. When a transition into              continue for an additional 2 seconds before stopping. Through-
+skill k is required, we restrict the search window Ct to the          out synthesis, we record the per-timestep velocity commands
+pre-skill entry window Ek , and transition to the matched entry       alongside the generated kinematic reference poses {qt }, and
+frame through Eq.(1). After the transition, the skill clip is         use these paired trajectories for subsequent policy training.
+replayed sequentially until the annotated end frame ek . At the          Transition Density. Motion matching naturally induces a
+switch, we place the paired terrain by applying the terrain-          high density of transitions by allowing a skill to be entered
+to-root offset at the matched entry frame in the reference            from multiple locomotion states that are nearby in the motion
+clip to the robot’s current root pose. During skill execution,        feature space. We exploit this to generate diverse skill en-
+we disable further motion matching and simply advance the             trances spanning different approach distances and stride phases
+playback index to preserve the contact-rich human motion.             (e.g., adding a preparatory step before a jump, or initiating
+   Skill → Locomotion transition. After reaching ek , we              a vault from different phases of a running gait), densifying
+return to locomotion by resuming motion matching via Eq.(1)           the distribution of pre-skill states. As illustrated in Fig. 3
+with Ct = Dloco , and continue sequential playback.                   (a), varying the initial approach distance (e.g., 3.9 m vs.
+4.8 m) forces the motion matching engine to select different              Actions are joint PD targets normalized by a fixed action
+stride sequences, resulting in distinct entry poses such as left-      scale. Due to challenging RL exploration, we set the action
+leg versus right-leg leads. To prevent non-causal shortcuts            scale to 1 for all experts, instead of the heuristics used in [20].
+(e.g., relying on elapsed time or step count), we randomize               2) Distilling a Unified Student Policy with DAgger and
+the pre-skill locomotion duration by sampling it uniformly             RL: A common approach for learning a unified policy from
+from [0.1, 3] s, with an average interval of 0.3 s. Such diverse       multiple experts is to apply DAgger-style imitation learn-
+motion-terrain pairs encourage context-based reaction, and are         ing [32, 8, 51, 33, 20]. While effective for easier motions
+critical for learning a policy that can reliably trigger the correct   such as stepping, we find that DAgger alone is insufficient
+skill under varying distances and timings.                             for highly dynamic skills such as climbing and vaulting.
+   Terrain Randomization. To improve robustness beyond the             These skills depend on brief, high-magnitude torque bursts,
+training obstacles while keeping the reference feasible, we ran-       but per-step imitation objectives like DAgger do not account
+domize obstacle geometry and pose around each synthesized              for episode outcomes and therefore do not explicitly favor
+trajectory. Specifically, obstacle width is sampled from the           such high-torque actions. For example, actions that result in
+minimum required by the reference up to 1.5 m; the remaining           higher or lower root positions that are symmetric about the
+dimensions are perturbed within ±5 cm; and obstacle yaw                reference may receive identical DAgger loss, even though only
+is randomized within ±45◦ , as illustrated in Fig. 3(c). This          the higher-root trajectory successfully clears the obstacle.
+exposes the policy to variations in obstacle shape and pose               To address this, we apply PPO alongside DAgger with a
+without invalidating the underlying reference.                         curriculum,
+   Distractors. We place distractor boxes with random sizes
+and poses near the reference trajectory to improve robustness                 L = λPPO LPPO + λD LD ,           λPPO + λD = 1,        (3)
+to irrelevant objects and reduce overfitting in the real world.
+                                                                       where λPPO and λD are their curriculum weights. Note that the
+                                                                       primary role of PPO is to provide a success-driven signal that
+C. Learning a Highly-Dynamic Visuomotor Policy                         encourages exploiting expert behaviors, such as high-torque
+   Our goal is to train a single perceptive policy capable of var-     actions, rather than exploring beyond the expert skill distri-
+ious long-horizon parkour skills. Commanded by a target ve-            bution. This hybrid setup substantially improves the unified
+locity, the humanoid will autonomously perform various park-           policy’s performance on diverse, highly dynamic skills.
+our skills based on the obstacles it perceives. Because the skills        Observations, Actions, and Domain Randomization. The
+are highly dynamic, we train skill-specific experts to achieve         policy observes proprioception signals including pelvis gravity
+high motion quality and then distill them into a single visuo-         vector and angular velocity, joint positions and velocities, and
+motor policy. To ensure scalability, we use a unified expert           the previous action. For vision, we use depth images rendered
+and distillation formulation without motion-specific tuning.           with Nvidia WARP [25] for high-throughput training. The
+   1) Training Expert Policies with Motion Tracking: We                policy also receives velocity commands defined in Sec. III-B2.
+follow BeyondMimic [20] and OmniRetarget [43] for motion               The action space and domain randomization for sim-to-real
+tracking, and refer readers to these prior works for details.          transfer are identical to those used in expert training setup.
+   Observations include reference joint position/velocity, ref-           Camera modeling and depth artifacts. We calibrate the
+erence pelvis pose error, pelvis linear/angular velocity, joint        simulated camera by matching robot self-visibility across a set
+position/velocity, and the previous action. We additionally            of poses in simulation and hardware using ROI overlap, and
+provide the expert with a 0.7 m × 0.7 m height scan, allowing          randomize camera extrinsics within 2.5 cm translation and 2.5°
+it to adapt to terrain randomizations.                                 rotation around the calibrated value to improve robustness to
+   Unlike [43], we enable global tracking with privileged              viewpoint shifts and mounting variability. We inject realistic
+observations (pelvis global position and velocity) so the expert       depth noise following prior work [33], but exclude Gaussian
+can learn recovery behaviors. This is important because the            blur since it can obscure obstacles at high speed. Finally, we
+reference motion is tightly coupled with the terrain, meaning          randomize observation delay between 60 ms and 80 ms to
+small drift or timing errors can quickly accumulate and must           simulate hardware latency fluctuations.
+be corrected to stay on the intended trajectory. While these              Curriculum. Since PPO gradients are noisy in the early
+privileged states are not available on hardware, they can be           stages and can otherwise undermine distillation, we apply a
+inferred from visual inputs by the student policy.                     warmup curriculum that gradually shifts from DAgger to PPO.
+   Adaptive Sampling is essential for learning difficult skills        The curriculum includes three parts.
+in expert training, which prioritizes sampling from regions that          First, we linearly tune down λD in Eq. (3)during the first 
+                                                                                                                                  k
+fail more frequently. For example, without it, the high-wall           half of training, capped at 0.1: λD (k) = max 0.1, 1 − K/2       ,
+climbing expert fails to converge to a meaningful behavior.            where k is the current iteration and K is the total iterations.
+   Rewards, Terminations, and Domain Randomization                        Second, left-right symmetry introduces multimodality:
+follow BeyondMimic [20]: DeepMimic-style tracking rewards              many skills admit two equally valid mirrored executions, for
+with action rate, joint limits, and collision penalties, tracking-     example, clearing a hurdle with either the left- or right-
+based early termination, and lightweight randomizations.               leg lead, while the reference trajectory represents only one
+                                                                     key events (toe-off → pull-up → swing → stable stand). For
+                                                                     a 1.25 m wall (96% of the robot’s height), the robot climbs
+                                                                     onto the platform in 3.63 s measured from toe-off.
+ t = 0.62 s      t = 2.32 s      t = 2.69 s       t = 3.62 s            Additional Parkour Skills. We demonstrate additional
+                                                                     highly dynamic parkour skills that require rapid contact tran-
+                                                                     sitions and momentum preservation. As shown in Fig. 5(a),
+                                                                     the robot clears a 0.4 m-high, 0.5 m-long obstacle within 0.8 s
+                                                                     from toe-off to toe-on, while covering more than 2 m forward
+ t = 0.62 s      t = 2.37 s      t = 2.85 s       t = 3.63 s
+                                                                     (154% of its height). The motion reaches a peak forward speed
+                                                                     of 3.41 m/s with an average speed of 2.53 m/s, highlighting its
+Fig. 4: Side-by-side comparison of high-climb agility. The           effective momentum preservation across the contact. Fig. 5(b)
+robot climbs onto a 1.25 m wall within 3.63 s.                       shows a drop landing from a 1.25 m platform. Upon landing,
+                                                                     the robot flexes its lower-body joints to absorb impact and
+of them. As a result, the distilled policy may perform the
+                                                                     stabilize its posture.
+mirrored mode, which still completes the skill but incurs a
+                                                                        2) Multi-Obstacle Course: A key strength of our frame-
+large tracking error and would be terminated incorrectly. This
+                                                                     work is that the policy generalizes to complex, multi-obstacle
+spurious failure signal can cause high reward variance for PPO.
+                                                                     courses despite the training data containing only single-
+To mitigate this issue, we relax the termination threshold from
+                                                                     obstacle traversal. This capability emerges from motion-
+0.5 m for the expert to 1 m using the same linear schedule, so
+                                                                     matching-based composition, which synthesizes long-horizon
+mirrored modes are not terminated prematurely.
+                                                                     reference trajectories that explicitly chain skills through shared
+   Finally, we enable adaptive learning rate and KL-based
+                                                                     locomotion segments and expose the policy to diverse ap-
+exploration control only when λPPO exceeds 0.1.
+   Adaptive Sampling of rollout start points is disabled during      proach distances and timings. As a result, the policy learns
+student training. While it helps experts focus on failures to        to execute skills reliably across varying obstacle sequences
+learn more difficult segments, it can undersample “borderline”       without explicit multi-obstacle supervision.
+clips that do not fail in simulation but exhibit jittery behavior,      Various Skills and Adaptivity to Obstacle Changes.
+which often leads to large sim-to-real gap on hardware. To           As shown in Fig. 5(c), the robot composes multiple skills,
+further avoid data imbalance across skills, we sample each           including stepping, low and high wall climb, into a continuous
+skill evenly and sample uniformly within each skill.                 run over courses with several obstacles. The visuomotor policy
+                                                                     generates transitions online, enabling smooth skill switching
+                        IV. E XPERIMENTS                             throughout the traversal. We further demonstrate closed-loop
+   We evaluate the proposed framework through a series of            adaptivity by randomly displacing multiple obstacles by ap-
+simulation and real-world experiments on a Unitree G1 hu-            proximately 0.5 m during execution. The policy adapts by
+manoid (1.3 m tall with 29 DoFs). For training, we use a 3-          adjusting its approach and maneuver timing, allowing the robot
+layer CNN and a 5-layer MLP with hidden sizes [2048, 1024,           to continue and complete the traversal in response to these
+512, 256, 128], trained with 16,384 parallel environments.           obstacle changes. These results demonstrate the adaptivity of
+Both expert and student policies are trained for 20K iterations.     our policy in long-horizon terrain traversal.
+
+A. Real-World Results                                                B. Quantitative Results in Simulation
+   We evaluate our system on real-world parkour tasks requir-           1) Experiment Setup: We evaluate all methods using suc-
+ing both highly-dynamic individual skills, long-horizon multi-       cess rate on parkour traversal tasks. Each task requires the
+skill composition and adaptation to environmental changes. All       robot to move forward at a fixed command speed (1.0 m/s
+skill execution is autonomous, while only simple 2D velocity         or 2.0 m/s) and clear a single obstacle of a specified height
+commands are provided for navigation.                                and 20◦ yaw randomization. To vary approach conditions,
+   1) Human-Level Agility: We first demonstrate that the robot       the humanoid is initialized at a random distance in front of
+can execute highly dynamic parkour skills, including a direct        the obstacle: for 1 m/s tasks, distances are sampled uniformly
+comparison with a human parkourist on a challenging high-            from 1.5 m to 3.0 m; for 2 m/s tasks, from 3.0 m to 4.5 m. For
+wall climb.                                                          each task, we evaluate 100 obstacle instances with different
+   High-Wall Climb with Human Comparison. We compare                 initial distances. A trial is successful if the robot traverses the
+the robot’s high-wall climb against a human performing the           obstacle and travels an additional 1.5 m without falling within
+same maneuver [34]. While often considered a fundamental             a fixed time horizon. We report average success rates of 5
+parkour technique, the high-wall climb demands substantial           trials per obstacle per task (500 trials total per task). We train
+upper-body strength and precise whole-body coordination, and         all variants with the full skill set, with details in Appx.B.
+remains difficult for untrained individuals. Despite this, the          2) Baseline Comparison: We evaluate the contribution of
+robot successfully performs the climb at a pace comparable           three key components: human reference motions, motion-
+to the human. As shown in Fig. 4, the robot executes a fast          matching-based skill composition, and the two-stage teacher-
+and coherent sequence with closely matched timing across             student training framework, by comparing our method against
+ (a)
+
+
+
+        t = 0.00 s                              t = 0.23 s                          t = 0.52 s                      t = 0.78 s
+
+
+
+
+ (b)
+
+
+
+        t = 0.00 s                           t = 0.23 s                             t = 0.55 s                      t = 0.82 s
+
+
+
+
+ (c)      t=4s                         t=9s                            t = 11 s                  t = 14 s                    t = 27 s
+
+
+
+
+          t = 34 s                     t = 40 s                        t = 43 s                   t = 46 s                  t = 48 s
+
+Fig. 5: Hardware results demonstrating agile, long-horizon parkour behaviors, including (a) a cat vault, (b) a drop landing from
+a 1.25 m wall, and (c) a 48-second terrain traversal with online adaptation to real-time obstacle displacement.
+
+TABLE I: Baseline success rate on parkour tasks with different                    the arms for support, highlighting the limitations of reward-
+commanded speeds and obstacle heights.                                            shaping RL alone for highly dynamic parkour.
+ Method                      1.0 m/s                         2.0 m/s                 The uncomposed motion data baseline performs poorly
+                     36 cm   58 cm      76 cm       36 cm    58 cm     76 cm
+                                                                                  despite access to atomic skills, showing that isolated motions
+                                                                                  are insufficient. A common failure mode is that the robot walks
+ Velocity Tracking   1.00     0.00       0.00       1.00      0.00     0.00
+ Uncomposed Data     0.06     0.02       0.00       0.37      0.27     0.07       up to an obstacle but fails to climb or jump over it. Without ex-
+ End-to-end Depth    0.95     0.07       0.08       0.78      0.19     0.14       plicit long-horizon composition, the policy neither experiences
+ Ours                1.00     0.99       0.95       1.00      0.99     0.95       skill transitions during training nor observes obstacles during
+                                                                                  the walking phase to prepare the appropriate upcoming skill. In
+the following baselines, as shown in Table I.                                     comparison, our motion-matching-based approach addresses
+                                                                                  this limitation by both generating coherent long-horizon skill
+   • Velocity Tracking. We train a humanoid to traverse
+                                                                                  composition with smooth transitions and exposing the policy
+      terrain using IsaacLab’s [27] standard velocity-tracking
+                                                                                  to diverse visual contexts during skill execution.
+      RL pipeline. The policy is learned purely with reward
+      shaping, without any human reference motion.                                   While end-to-end depth-based training can handle low
+   • Uncomposed Motion Data. This baseline removes mo-
+                                                                                  obstacles, its performance degrades on more challenging tasks,
+      tion matching, training instead on uncomposed locomo-                       suggesting difficulty in RL exploration when training from
+      tion data and atomic parkour skill clips.                                   scratch. In contrast, our expert-distillation pipeline achieves
+   • End-to-end Depth Policy. This baseline removes distil-
+                                                                                  substantially higher success rates across obstacle heights,
+      lation and trains a single depth-based visuomotor policy                    particularly for highly dynamic skills.
+      end-to-end on the motion-matching data, using the same                         3) Ablation Study: We conduct ablation studies to study the
+      observations as the student and the same motion-tracking                    effect of motion-matching reference data density, training scal-
+      reward as the experts.                                                      ability, and the role of RL during policy distillation (Table II).
+   We found that the velocity-tracking baseline achieves sim-                        Motion Matching Density. We hypothesize that diversity
+ilar performance to prior reward-shaping works [52, 22] and                       in motion-matching data, especially approach distances, is
+succeeds in traversing the 36 cm obstacle, but fails on higher                    critical for accurate timing and task success. To test this, we
+obstacles. Specifically, it largely relies on foot-only stepping                  ablate approach-distance coverage in the reference dataset:
+and does not discover whole-body climbing strategies that use                       •   Extreme Distances. Only minimum and maximum ap-
+TABLE II: Success rate on parkour tasks with different motion                 placement, it fails to produce the brief, high-magnitude torque
+matching densities and RL strategies during distillation.                     burst needed to lift the torso. As discussed in Sec. III-C2,
+ Method                           1.0 m/s                   2.0 m/s           this likely occurs because the decisive torque burst spans only
+                          58 cm   76 cm     94 cm   36 cm   58 cm     76 cm   a few timesteps, and per-step imitation loss barely penalizes
+ Extreme Distances        0.99     0.62     0.64    0.98     0.60     0.58
+                                                                              slightly underestimated actions. In contrast, since RL accounts
+ Half Density             0.95     0.32     0.57    0.99     0.85     0.81    for episode success, it encourages torque bursts that are more
+ DAgger Only              0.16     0.03     0.12    0.63     0.09     0.10    likely to complete the pull-up, yielding both higher reward and
+ DAgger & Alive Reward    1.00     0.90     0.96    0.94     0.91     0.84
+ DAgger & Root Tracking   1.00     0.79     0.75    1.00     0.92     0.87
+                                                                              lower DAgger loss.
+ 1/4 Training Envs        0.97     0.00     0.59    0.94     0.65     0.58
+                                                                                 We further evaluate how sensitive the DAgger+RL stage is
+ 1/2 Training Envs        0.94     0.60     0.68    0.97     0.79     0.75    to reward design. Interestingly, using root tracking or even
+ 3-layer MLP              0.99     0.02     0.00    0.98     0.89     0.81
+ 4-layer MLP              1.00     0.94     0.08    1.00     0.94     0.88
+                                                                              only an alive reward achieves success rates comparable to
+ Ours                     0.99     0.95     1.00    1.00     0.98     0.90
+                                                                              whole-body tracking on difficult skills. This suggests that,
+                                                                              when co-trained with DAgger, RL is relatively robust to reward
+                                                                              choice and mainly acts as a success-driven exploitation signal
+     proach distances.                                                        that compensates for DAgger’s underestimation, rather than
+  •  Half Density. Randomly selected half of the full motion-                 relying on detailed task-specific shaping. Accordingly, while
+     matching data.                                                           we use whole-body tracking in this work, a simple alive reward
+   Using Extreme distances data leads to reduced success                      may suffice when scaling to larger skill sets.
+rates across all tasks, as the policy fails to generalize                        In addition, our approach differs from prior work that first
+to intermediate distances where contact-timing is critical.                   trains a strong DAgger policy and then applies a separate RL
+Training on Half density data generally yields lower success                  fine-tuning stage [33]. Here, we use RL during distillation
+rates on harder skills, especially when the remaining samples                 to correct imitation-induced conservatism and improve skill
+are skewed toward one end of the distance range. For example,                 learning. We also find that the DAgger term must remain
+in the 1.0 m/s climbing task on 76 cm and 94 cm obstacles,                    active throughout training: if we drop the DAgger loss after
+reduced local density leads to unreliable hand-placement                      the curriculum and continue with pure RL, the policy often
+timing. In contrast, the full dataset densely covers approach                 develops jittery, unnatural behaviors, suggesting that in a
+conditions, enabling robust skill execution across varying                    high-dimensional action space the behavior cloning objective
+approach distances.                                                           provides a critical regularization for RL.
+   Training Scalability. We ablate the number of parallel train-
+                                                                                                    V. C ONCLUSION
+ing environments and model capacity to assess the scalability.
+   • 1/4 Training Envs. Use 1/4 of the training environments.
+                                                                                 We have presented Perceptive Humanoid Parkour, a modular
+   • 1/2 Training Envs. Use 1/2 of the training environments.
+                                                                              framework that enables humanoid robots to autonomously
+   • 3-Layer MLP. Use a 3-layer MLP with hidden sizes of
+                                                                              execute long-horizon, highly dynamic parkour behaviors using
+     [512, 256, 128].                                                         onboard perception. By combining motion-matching-based
+   • 4-Layer MLP. Use a 4-layer MLP with hidden sizes of
+                                                                              skill composition with a teacher-student RL pipeline, our ap-
+     [1024, 512, 256, 128].                                                   proach preserves the agility of human motions while enabling
+                                                                              perception-driven adaptation to diverse obstacles. We find
+   Unlike training from scratch, where additional rollouts often
+                                                                              that dense motion matching is critical in providing coherent
+yield diminishing returns due to exploration limits, our distil-
+                                                                              long-horizon references and exposes the policy to a wide
+lation framework scales favorably with both model capacity
+                                                                              range of approach conditions, while augmenting distillation
+and rollout throughput. Increasing the number of parallel
+                                                                              with RL transfers the capability from single-skill, privileged-
+environments or using a deeper network generally improves
+                                                                              information experts to the multi-skill, depth-based student
+success, especially on more challenging parkour tasks.
+                                                                              efficiently. Through extensive simulation studies and zero-shot
+   RL in Distillation. We ablate the RL objective and its                     deployment on a Unitree G1 robot, we demonstrate state-of-
+reward design in the distillation stage to understand its role.               the-art agile, adaptive, whole-body parkour in the real world.
+   • DAgger Only. Remove the RL loss during distillation.                        While our pipeline enables long-horizon, highly dynamic
+   • DAgger + RL Alive Reward. Use only an alive/progress                     humanoid parkour, it currently lacks semantic scene under-
+     reward, without motion-tracking terms.                                   standing. Incorporating richer conditioning signals, such as
+   • DAgger + RL Root Tracking Reward. Use a root-                            language, could enable finer control over diversity and styles.
+     tracking reward instead of full whole-body tracking.                     In addition, our real-world capabilities are constrained by
+   We find that RL is critical for effective distillation. The                perception and hardware. With a short-range, narrow field-
+DAgger only student exhibits a clear performance drop,                        of-view camera at a high running speed, obstacle geometries
+indicating that DAgger alone is insufficient to capture highly                may not be visible sufficiently early, forcing the robot to
+dynamic skills even with strong experts. For example, on                      commit under perceptual ambiguity. Improved sensing and
+the 76 cm obstacle, the DAgger student consistently stalls                    semantic scene understanding could reduce this ambiguity
+at the pull-up phase: although it learns the accurate hand                    and support richer context reasoning. Finally, our hardware
+lacks sufficiently strong hands or grippers for interactions with        Learned motion matching. ACM Transactions on Graph-
+edges and bars to be tested, preventing more extreme climbing            ics (TOG), 2020.
+beyond the robot’s height or hanging maneuvers.                     [15] Xiaoyu Huang, Takara Truong, Yunbo Zhang, Fangzhou
+                                                                         Yu, Jean Pierre Sleiman, Jessica Hodgins, Koushil
+                         R EFERENCES                                     Sreenath, and Farbod Farshidian. Diffuse-cloc: Guided
+                                                                         diffusion for physics-based character look-ahead control.
+ [1] Ananye Agarwal, Ashish Kumar, Jitendra Malik, and                   arXiv preprint arXiv:2503.11801, 2025.
+     Deepak Pathak. Legged locomotion in challenging ter-           [16] Dvij Kalaria, Sudarshan S Harithas, Pushkal Katara,
+     rains using egocentric vision. In Conference on robot               Sangkyung Kwak, Sarthak Bhagat, Shankar Sastry, Sri-
+     learning, pages 403–415. PMLR, 2023.                                nath Sridhar, Sai Vemprala, Ashish Kapoor, and Jonathan
+ [2] Qingwei Ben, Botian Xu, Kailin Li, Feiyu Jia, Wentao                Chung-Kuan Huang. Dreamcontrol: Human-inspired
+     Zhang, Jingping Wang, Jingbo Wang, Dahua Lin, and                   whole-body humanoid control for scene interaction via
+     Jiangmiao Pang. Gallant: Voxel grid-based humanoid                  guided diffusion. arXiv preprint arXiv:2509.14353, 2025.
+     locomotion and local-navigation across 3d constrained          [17] Dongho Kang, Simon Zimmermann, and Stelian Coros.
+     terrains, 2025. URL https://arxiv.org/abs/2511.14625.               Animal gaits on quadrupedal robots using motion match-
+ [3] Kevin Bergamin, Simon Clavet, Daniel Holden, and                    ing and model-based control. In 2021 IEEE/RSJ Inter-
+     James Richard Forbes. Drecon: data-driven responsive                national Conference on Intelligent Robots and Systems
+     control of physics-based characters. ACM Transactions               (IROS), pages 8500–8507. IEEE, 2021.
+     On Graphics (TOG), 38(6):1–11, 2019.                           [18] Ashish Kumar, Zipeng Fu, Deepak Pathak, and Jitendra
+ [4] David Bollo. Inertialization: High-performance anima-               Malik. Rma: Rapid motor adaptation for legged robots.
+     tion transitions in Gears of War. Proc. of GDC, 2018.               arXiv preprint arXiv:2107.04034, 2021.
+ [5] Michael Büttner and Simon Clavet. Motion matching -           [19] Joonho Lee, Jemin Hwangbo, Lorenz Wellhausen,
+     the road to next gen animation. Proc. of Nucl.ai, 2015.             Vladlen Koltun, and Marco Hutter. Learning quadrupedal
+ [6] Ken Caluwaerts, Atil Iscen, J Chase Kew, Wenhao Yu,                 locomotion over challenging terrain. Science robotics, 5
+     Tingnan Zhang, Daniel Freeman, Kuang-Huei Lee, Lisa                 (47):eabc5986, 2020.
+     Lee, Stefano Saliceti, Vincent Zhuang, et al. Bark-            [20] Qiayuan Liao, Takara E Truong, Xiaoyu Huang, Yu-
+     our: Benchmarking animal-level agility with quadruped               man Gao, Guy Tevet, Koushil Sreenath, and C Karen
+     robots. arXiv preprint arXiv:2305.14654, 2023.                      Liu. Beyondmimic: From motion tracking to versatile
+ [7] Zixuan Chen, Mazeyu Ji, Xuxin Cheng, Xuanbin Peng,                  humanoid control via guided diffusion. arXiv preprint
+     Xue Bin Peng, and Xiaolong Wang. Gmt: General                       arXiv:2508.08241, 2025.
+     motion tracking for humanoid whole-body control. arXiv         [21] Junfeng Long, Zirui Wang, Quanyi Li, Jiawei Gao,
+     preprint arXiv:2506.14770, 2025.                                    Liu Cao, and Jiangmiao Pang. Hybrid internal model:
+ [8] Xuxin Cheng, Kexin Shi, Ananye Agarwal, and Deepak                  Learning agile legged locomotion with simulated robot
+     Pathak. Extreme parkour with legged robots. In 2024                 response. arXiv preprint arXiv:2312.11460, 2023.
+     IEEE International Conference on Robotics and Automa-          [22] Junfeng Long, Junli Ren, Moji Shi, Zirui Wang, Tao
+     tion (ICRA), pages 11443–11450. IEEE, 2024.                         Huang, Ping Luo, and Jiangmiao Pang. Learning hu-
+ [9] Simon Clavet. Motion matching and the road to next-gen              manoid locomotion with perceptive internal model. In
+     animation. Proc. of GDC, 2016.                                      2025 IEEE International Conference on Robotics and
+[10] Zipeng Fu, Qingqing Zhao, Qi Wu, Gordon Wet-                        Automation (ICRA), pages 9997–10003. IEEE, 2025.
+     zstein, and Chelsea Finn. Humanplus: Humanoid shad-            [23] Shixin Luo, Songbo Li, Ruiqi Yu, Zhicheng Wang, Jun
+     owing and imitation from humans. arXiv preprint                     Wu, and Qiuguo Zhu. Pie: Parkour with implicit-explicit
+     arXiv:2406.10454, 2024.                                             learning framework for legged robots. IEEE Robotics
+[11] Ruiyu Gou, Michiel van de Panne, and Daniel Holden.                 and Automation Letters, 2024.
+     Control operators for interactive character animation.         [24] Zhengyi Luo, Ye Yuan, Tingwu Wang, Chenran Li,
+     ACM Transactions on Graphics (TOG), 44(6):1–20,                     Sirui Chen, Fernando Castañeda, Zi-Ang Cao, Jiefeng
+     2025.                                                               Li, David Minor, Qingwei Ben, et al. Sonic: Supersizing
+[12] Junzhe He, Chong Zhang, Fabian Jenelten, Ruben                      motion tracking for natural humanoid whole-body con-
+     Grandia, Moritz Bächer, and Marco Hutter. Attention-               trol. arXiv preprint arXiv:2511.07820, 2025.
+     based map encoding for learning generalized legged             [25] Miles Macklin. Warp: A high-performance python frame-
+     locomotion. Science Robotics, 10(105):eadv3604, 2025.               work for gpu simulation and graphics. https://github.com/
+[13] David Hoeller, Nikita Rudin, Dhionis Sako, and Marco                nvidia/warp, March 2022. NVIDIA GPU Technology
+     Hutter. Anymal parkour: Learning agile navigation for               Conference (GTC).
+     quadrupedal robots. Science Robotics, 9(88):eadi7566,          [26] Takahiro Miki, Joonho Lee, Jemin Hwangbo, Lorenz
+     2024.                                                               Wellhausen, Vladlen Koltun, and Marco Hutter. Learning
+[14] Daniel Holden, Anas Kanoun, Michiel Bŭttner, Sofien                robust perceptive locomotion for quadrupedal robots in
+     Bouaziz, Sebastian Thrun, and Aaron Hertzmann.                      the wild. Science robotics, 7(62):eabk2822, 2022.
+[27] Mayank Mittal, Pascal Roth, James Tigue, Antoine                   versarial motion priors. IEEE Robotics and Automation
+     Richard, Octi Zhang, Peter Du, Antonio Serrano-Muñoz,             Letters, 8(8):4975–4982, 2023.
+     Xinjie Yao, René Zurbrügg, Nikita Rudin, et al. Isaac       [40] Weiji Xie, Jinrui Han, Jiakun Zheng, Huanyu Li, Xinzhe
+     lab: A gpu-accelerated simulation framework for multi-             Liu, Jiyuan Shi, Weinan Zhang, Chenjia Bai, and Xue-
+     modal robot learning. arXiv preprint arXiv:2511.04831,             long Li. Kungfubot: Physics-based humanoid whole-
+     2025.                                                              body control for learning highly-dynamic skills. arXiv
+[28] I Nahrendra, Byeongho Yu, and Hyun Myung.                          preprint arXiv:2506.12851, 2025.
+     Dreamwaq: Learning robust quadrupedal locomotion              [41] Michael Xu, Yi Shi, KangKang Yin, and Xue Bin Peng.
+     with implicit terrain imagination via deep reinforcement           Parc: Physics-based augmentation with reinforcement
+     learning. arXiv preprint arXiv:2301.10602, 2023.                   learning for character controllers. In ACM SIGGRAPH,
+[29] Yixuan Pan, Ruoyi Qiao, Li Chen, Kashyap Chitta, Liang             2025.
+     Pan, Haoguang Mai, Qingwen Bu, Hao Zhao, Cunyuan              [42] Pei Xu, Zhen Wu, Ruocheng Wang, Vishnu Sarukkai,
+     Zheng, Ping Luo, et al. Agility meets stability: Versa-            Kayvon Fatahalian, Ioannis Karamouzas, Victor Zordan,
+     tile humanoid control with heterogeneous data. arXiv               and C Karen Liu. Learning to ball: Composing policies
+     preprint arXiv:2511.17373, 2025.                                   for long-horizon basketball moves. ACM Transactions
+[30] Xue Bin Peng, Pieter Abbeel, Sergey Levine, and Michiel            on Graphics (TOG), 44(6):1–14, 2025.
+     Van de Panne. Deepmimic: Example-guided deep re-              [43] Lujie Yang, Xiaoyu Huang, Zhen Wu, Angjoo Kanazawa,
+     inforcement learning of physics-based character skills.            Pieter Abbeel, Carmelo Sferrazza, C Karen Liu, Rocky
+     ACM Transactions On Graphics (TOG), 37(4):1–14,                    Duan, and Guanya Shi.          Omniretarget: Interaction-
+     2018.                                                              preserving data generation for humanoid whole-body
+[31] Xue Bin Peng, Ze Ma, Pieter Abbeel, Sergey Levine, and             loco-manipulation and scene interaction. arXiv preprint
+     Angjoo Kanazawa. Amp: Adversarial motion priors for                arXiv:2509.26633, 2025.
+     stylized physics-based character control. ACM Transac-        [44] Ruihan Yang, Ge Yang, and Xiaolong Wang. Neural
+     tions on Graphics (TOG), 2021.                                     volumetric memory for visual locomotion control. In
+[32] Stéphane Ross, Geoffrey Gordon, and Drew Bagnell. A               Proceedings of the IEEE/CVF conference on computer
+     reduction of imitation learning and structured prediction          vision and pattern recognition, pages 1430–1440, 2023.
+     to no-regret online learning. In Proceedings of the           [45] Alan Yu, Ge Yang, Ran Choi, Yajvan Ravan, John
+     fourteenth international conference on artificial intelli-         Leonard, and Phillip Isola. Learning visual parkour from
+     gence and statistics, pages 627–635. JMLR Workshop                 generated images. In 8th Annual Conference on Robot
+     and Conference Proceedings, 2011.                                  Learning, 2024.
+[33] Nikita Rudin, Junzhe He, Joshua Aurand, and Marco             [46] Ruiqi Yu, Qianshi Wang, Yizhen Wang, Zhicheng Wang,
+     Hutter. Parkour in the wild: Learning a general and exten-         Jun Wu, and Qiuguo Zhu. Walking with terrain recon-
+     sible agile locomotion policy using multi-expert distilla-         struction: Learning to traverse risky sparse footholds.
+     tion and rl fine-tuning. arXiv preprint arXiv:2505.11164,          arXiv preprint arXiv:2409.15692, 2024.
+     2025.                                                         [47] Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo
+[34] Salgadopk. Learn parkour - climb up tutorial. URL                  Kanazawa, Rocky Duan, Pieter Abbeel, Guanya Shi,
+     https://youtu.be/6U1sIgqgPFo?si=339TPTxlFB5lWGB1.                  Jiajun Wu, and C Karen Liu. Twist2: Scalable, portable,
+[35] Jingkai Sun, Gang Han, Pihai Sun, Wen Zhao, Jiahang                and holistic humanoid data collection system. arXiv
+     Cao, Jiaxu Wang, Yijie Guo, and Qiang Zhang. Dpl:                  preprint arXiv:2511.02832, 2025.
+     Depth-only perceptive humanoid locomotion via realistic       [48] Tong Zhang, Boyuan Zheng, Ruiqian Nai, Yingdong Hu,
+     depth synthesis and cross-attention terrain reconstruction.        Yen-Jen Wang, Geng Chen, Fanqi Lin, Jiongye Li, Chuye
+     arXiv preprint arXiv:2510.07152, 2025.                             Hong, Koushil Sreenath, et al. Hub: Learning extreme
+[36] Guy Tevet, Sigal Raab, Brian Gordon, Yoni Shafir, Daniel           humanoid balance. CoRL, 2025.
+     Cohen-or, and Amit Haim Bermano. Human motion                 [49] Ziyu Zhang, Sergey Bashkirov, Dun Yang, Michael Tay-
+     diffusion model. In ICLR, 2023.                                    lor, and Xue Bin Peng. Add: Physics-based motion imi-
+[37] Huayi Wang, Zirui Wang, Junli Ren, Qingwei Ben, Tao                tation with adversarial differential discriminators. arXiv
+     Huang, Weinan Zhang, and Jiangmiao Pang. Beamdojo:                 preprint arXiv:2505.04961, 2025.
+     Learning agile humanoid locomotion on sparse footholds.       [50] Shaoting Zhu, Ziwen Zhuang, Mengjie Zhao, Kun-Ying
+     In Robotics: Science and Systems (RSS), 2025.                      Lee, and Hang Zhao. Hiking in the wild: A scalable
+[38] Huayi Wang, Wentao Zhang, Runyi Yu, Tao Huang, Junli               perceptive parkour framework for humanoids. arXiv
+     Ren, Feiyu Jia, Zirui Wang, Xiaojie Niu, Xiao Chen,                preprint arXiv:2601.07718, 2026.
+     Jiahe Chen, et al. Physhsi: Towards a real-world gener-       [51] Ziwen Zhuang, Zipeng Fu, Jianren Wang, Christo-
+     alizable and natural humanoid-scene interaction system.            pher Atkeson, Soeren Schwertfeger, Chelsea Finn, and
+     arXiv preprint arXiv:2510.11072, 2025.                             Hang Zhao. Robot parkour learning. arXiv preprint
+[39] Jinze Wu, Guiyang Xin, Chenkun Qi, and Yufei Xue.                  arXiv:2309.05665, 2023.
+     Learning robust and agile legged locomotion using ad-         [52] Ziwen Zhuang, Shenzhe Yao, and Hang Zhao. Humanoid
+parkour learning.   arXiv preprint arXiv:2406.10759,
+2024.
+                           A PPENDIX                                 and evaluate the resulting ψ(τ ) at the same horizons via Eq. (4)
+                                                                     (no integration is needed).
+A. Motion Matching Implementation Details
+                                                                        We evaluate at τ ∈ {0.33, 0.67, 1.0} s, and transform the
+   This section provides implementation details for the motion       resulting future positions p(τ ) and facing directions into the
+matching procedure used to synthesize long-horizon parkour           character’s local coordinate frame to form the future trajectory
+reference trajectories.                                              feature t̂t .
+   1) Motion Database and Feature Precomputation: All mo-               3) Transition Smoothing via Inertialization: To ensure
+tion clips are first retargeted to a 29-DOF Unitree G1 hu-           smooth transitions when switching the playback index to a
+manoid using OmniRetarget [43] and represented as frame              newly retrieved frame, we adopt inertialization [4]. The key
+sequences. At each frame i, we store the robot configuration         idea is to compute an offset between the currently playing
+qi = (pi , ri , θi ), consisting of the root translation pi ∈ R3 ,   motion and the target motion at the transition instant, apply this
+root quaternion ri ∈ R4 , and joint angles θi ∈ R29 . For            offset after switching so the output remains continuous, and
+each frame, we also precompute a matching feature vector             then gradually decay the offset to zero. We decay this offset
+xi derived from qi . Following [14], xi ∈ R27 is expressed in        using the same critically damped spring model as in Eq. (4),
+the character’s local coordinate frame and consists of:              but with the goal set to zero.
+  • Future root trajectory ti ∈ R12 : Planar root positions
+    and facing directions at 0.33s, 0.67s, and 1s into the           B. Skill List and Training Implementation Details
+    future.                                                              1) Skill List: Our motion library includes locomotion and
+                             12
+  • Local foot state fi ∈ R : Positions and linear velocities        a set of atomic parkour skills. Locomotion provides a shared
+    of the left and right feet expressed in the root frame.          transition manifold and includes standing, walking, and run-
+                           3
+  • Root velocity hi ∈ R : Root linear velocity.                     ning motions spanning commanded speeds from 0.8 to 3.5 m/s.
+To improve data coverage, we augment the motion database             Most parkour skills are instantiated at 1.0 m/s and 2.0 m/s. We
+by mirroring all motion clips. For parkour motion clips, we          additionally include a single 3.0 m/s cat-vault skill to cover
+manually fit a box-shaped terrain aligned with each motion.          extreme-speed vaulting behaviors. Table III summarizes the
+   2) Query Feature Construction: At runtime, a query feature        full skill list and the total duration of motion clips for each
+x̂t is constructed from the current robot configuration qt and a     category.
+2D velocity command. We first extract the kinematic features             2) Motion Tracking Details: Specific reward formulations
+from qt to form the pose-based part of the query, namely the         and domain randomization settings used for expert policy
+local foot state fˆt and the root velocity ĥt . We then compute     learning from [20] are summarized in Table IV and Table V
+the short-horizon future root trajectory from the 2D velocity        for reference.
+command to form the command-based part t̂t .                             3) Distillation Details: During student training, we relax
+   Following [14], we convert the 2D velocity command into a         the termination conditions relative to the expert to prevent
+future root trajectory using a critically damped spring model.       premature termination of valid but mirrored executions. While
+We apply the spring to (i) the 2D root velocity and (ii) the         this improves PPO stability, the student may visit states that are
+root heading direction. The target 2D velocity is set to the         out-of-distribution for the expert policies, which were trained
+commanded 2D velocity ucmd   t   ∈ R2 . The target heading ψtcmd     under the original termination thresholds and may not provide
+                   cmd   cmd                                         meaningful actions in these regimes. In particular, when the
+is set to atan2(ut,y , ut,x ).
+   Critically damped spring closed form. Let s denote the            student violates the expert’s original termination condition but
+spring position and ṡ its velocity, with goal sgoal and damping     remains within the relaxed one, querying the expert would
+parameter y > 0. Define j0 = s0 − sgoal and j1 = ṡ0 + y j0 .        yield unreliable supervision. To avoid introducing incorrect
+Then the spring state at any future time τ admits the closed         DAgger signals, we disable the DAgger loss at such timesteps
+form                                                                 and rely solely on the PPO objective.
+                s(τ ) = e−yτ j0 + τ j1 + sgoal .                         For depth sensing, beyond the aforementioned camera noise,
+                                         
+                                                             (4)
+                                                                     we also add a random depth offset within ±3 cm and inject
+   Planar position from target velocity. For planar root             i.i.d. Gaussian noise with a standard deviation of 3 cm into the
+translation, we use the spring in velocity space: the spring         depth observations during training. The onboard depth camera
+“position” corresponds to planar velocity (and its derivative to     operates at 30 Hz.
+acceleration). We obtain future root positions by integrating            4) Training Hyperparameters: We include all hyperparam-
+the closed-form velocity:                                            eters for two-stage training in Table VI for reference.
+              j1 −yτ −j0 − τ j1 −yτ j1 j0
+p(τ ) = p0 −     e    +             e    + 2+       + ucmd
+                                                       t   τ,        C. Details for Baselines
+              y2              y            y      y
+                                                          (5)           1) Velocity Tracking Baseline: To show the importance
+applied component-wise in the plane.                                 of human reference motion in our framework, we include a
+  Heading direction from target heading. For rotation, we            standard reward-shaping velocity-tracking baseline that learns
+apply the spring directly to the heading angle ψ toward ψtcmd        locomotion purely from handcrafted rewards and a terrain
+            Skill                                 Duration (s)                   TABLE IV: Reward formulation using Gaussian-shaped track-
+                                                                                 ing scores.
+            Locomotion
+            Locomotion                                 495.5                      Reward Terms                  Equation                                                         Weight
+                                                                                  Task (Tracking)
+            Parkour skills @ 1.0 m/s                                              Body Position
+                                                                                                                   
+                                                                                                                exp − |B 1 | b∈Btarget ∥pdes
+                                                                                                                                  P
+                                                                                                                                                      − pb ∥2 /0.32
+                                                                                                                                                                   
+                                                                                                                                                                                  1.0
+                                                                                                                          target                  b
+            Step (36 cm)                               2.2                                                                                                             
+                                                                                                                exp − |B 1 | b∈Btarget ∥ log(Rbdes Rb⊤ )∥2 /0.42
+                                                                                                                                  P                             
+                                                                                  Body Orientation                                                                                1.0
+            Climb (58 cm)                              12.1                                                        
+                                                                                                                          target
+                                                                                                                                                                    
+                                                                                                                exp − |B 1 | b∈Btarget ∥vbdes − vb ∥2 /1.02
+                                                                                                                                  P                          
+                                                                                  Body Linear velocity                                                                            1.0
+            Climb (76 cm)                               8.8                                                        
+                                                                                                                          target
+                                                                                                                                                                      
+                                                                                                                exp − |B 1 | b∈Btarget ∥ωbdes − ωb ∥2 /3.142
+                                                                                                                                  P                           
+            Climb (94 cm)                              10.3                       Body Angular velocity
+                                                                                                                          target
+                                                                                                                                                                                  1.0
+                                                                                                                                                 
+                                                                                  Anchor Position               exp − ∥pdes                2
+                                                                                                                         anchor − panchor ∥ /0.3
+                                                                                                                                                2                                 1.0
+            Parkour skills @ 2.0 m/s                                                                                                                
+                                                                                  Anchor Orientation                                  ⊤
+                                                                                                                exp − ∥ log(Ranchor Ranchor )∥ /0.42
+                                                                                                                               des            2                                   1.0
+            Step (36 cm)                                1.6
+            Climb (58 cm)                               6.1                       Regularization
+            Climb (76 cm)                               4.4                       Action smoothness             ∥at − a t−1 ∥2                                                  −0.1
+                                                                                                                PN                                           
+                                                                                  Joint position limit                   max(lj − θj , 0) + max(θj − uj , 0)                     −10.0
+            Climb (94 cm)                               5.2                                                     Pj=1         self         
+                                                                                  Undesired self-contacts         b∈B
+                                                                                                                   / ee   1  ∥f b  ∥ > 1 N                                       −0.5
+            Climb (125 cm)                              5.9
+            Dash Vault                                  5.0
+                                                                                 TABLE V: Domain randomization parameters. (U[·]: uniform
+            Speed Vault                                 3.1
+                                                                                 distribution)
+            Parkour skills @ 3.0 m/s
+                                                                                  Domain Randomization                            Sampling Distribution
+            Cat Vault                                   1.5
+                                                                                  Physical parameters
+                                                                                  Static friction coefficients                    µstatic ∼ U[0.4, 1.3]
+     TABLE III: Motion clips used in our motion library.                          Dynamic friction coefficients                   µdynamic ∼ U [0.4, 1.1]
+                                                                                  Restitution coefficient                         erest ∼ U[0, 0.5]
+                                                                                  Default joint positions (except ankle) [rad]    ∆θj0 ∼ U [−0.01, 0.01]
+                                                                                  Default ankle joint positions [rad]             ∆θj0 ∼ U [−0.03, 0.03]
+                                                                                  Torso COM offset [m]                            ∆x ∼ U[−0.025, 0.025], ∆y, ∆z ∼ U [−0.05, 0.05]
+curriculum, without any motion imitation or human refer-                          Root velocity perturbations
+ence trajectories. We follow IsaacLab’s standard rough-terrain                    Root linear vel [m/s]                           vx , vy ∼ U[−0.1, 0.1], vz ∼ U [−0.05, 0.05]
+                                                                                  Push duration [s]                               ∆t ∼ U[1.0, 3.0]
+velocity-tracking recipe using its Unitree G1 rough-terrain                       Root angular vel [rad/s]                        ωx , ωy , ωz ∼ U [−0.1, 0.1]
+configuration1 , which is widely used for humanoid locomo-
+tion and terrain traversal and is largely consistent with state-
+of-the-art reward-shaping-based setups [13]. In alignment with                   implementation details and careful tuning [38], and we did not
+prior works [52, 13], we also employ a terrain curriculum                        have the bandwidth to fully explore this tuning space. For this
+to ease learning. Specifically, we gradually increase terrain                    reason, we do not include AMP in the formal comparison, and
+difficulty from 0.3 m to 1.0 m over 10 levels (with a 2 m run-                   instead leave this result as a note for context.
+up), providing a smooth progression of tasks that helps the
+policy bootstrap stable locomotion on easier terrain before
+tackling harder contact and balance challenges as the terrain
+becomes progressively harder. The curriculum advances the
+robot to a harder level once it achieves sufficient success
+on the current level, and moves it back to an easier level
+if its performance drops. Notably, different from our student
+                                                                                                    TABLE VI: Training hyperparameters.
+policy which relies on an onboard depth camera for sensing,
+this baseline directly receives a local terrain height map (i.e.,                 Hyperparameter                     Motion Tracking                             Distillation
+                                                                                                                     Architecture
+privileged height observations from simulation), which has                        Actor / Student MLP hidden dims     [512, 256, 128]                [2048, 1024, 512, 256, 128]
+been shown highly effective in prior parkour systems [13, 33].                    Critic MLP hidden dims              [512, 256, 128]                      [512, 256, 128]
+                                                                                  Activation function                        ELU                                ELU
+   2) AMP Baseline: Since AMP [31] is a popular algorithm                         Init noise std                              1.0                                0.01
+                                                                                  Depth backbone                               –                        3-layer CNN + GAP
+for chaining skills with human reference data, we also im-                        Depth input resolution                        –                             58 × 87
+plemented an AMP baseline by following the MimicKit2                              Depth output dim                              –                                 32
+                                                                                                                       Training
+AMP implementation released by the original AMP authors.                          Steps per environment                        24                                  24
+In our experiments, this baseline can walk stably and track the                   Max iterations                            20,000                              20,000
+                                                                                  Learning rate                          1 × 10−3                             3 × 10−4
+commanded velocity, but it does not perform well on obstacle                      Schedule                                 adaptive                  adaptive after 1000 iterations
+traversal: it fails on most tasks, especially the harder ones,                    Clip parameter                              0.2                                  0.2
+                                                                                  Entropy coefficient                        0.005                               0.001
+which is broadly consistent with prior reports that AMP can                       Discount factor (γ)                         0.99                                0.99
+                                                                                  GAE λ                                      0.95                                 0.95
+be difficult to extend to agile motions [49]. At the same time,                   Desired KL                                 0.01                                 0.01
+we recognize that AMP performance can depend strongly on                          Learning epochs                               5                                   2
+                                                                                  Mini-batches                                  4                                  96
+   1 Code available at https://github.com/isaac-sim/IsaacLab/blob/main/source/    Max grad norm                               1.0                                  1.0
+                                                                                                                 Distillation-Specific
+isaaclab tasks/isaaclab tasks/manager based/locomotion/velocity/config/g1/        Curriculum end epoch                         –                                   10,000
+rough env cfg.py.                                                                 Distill loss type                             –                                   mse
+   2 Code available at https://github.com/xbpeng/MimicKit.                        DAgger loss coefficient                      –                                    10.0
+

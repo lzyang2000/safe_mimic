@@ -1,0 +1,47 @@
+[project]
+name = "safe-mimic"
+version = "0.1.0"
+description = "Perceptive Unitree G1 motion tracking tasks for mjlab"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "mjlab==1.6.0",
+  # PyPI's current CUDA 13 build requires a newer driver than this RTX 4090
+  # workstation provides. Match the known-good Dodgeball CUDA 12.8 stack.
+  "torch==2.9.1",
+  "torchvision==0.24.1",
+  "tqdm>=4.67.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[project.entry-points."mjlab.tasks"]
+safe-mimic = "safe_mimic.tasks"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+  "ruff>=0.12.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.11,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+indent-width = 2
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
