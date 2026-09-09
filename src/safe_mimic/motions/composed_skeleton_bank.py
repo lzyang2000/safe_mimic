@@ -254,6 +254,9 @@ class OnlineComposedHumanSampler:
       (num_envs,), -torch.inf, device=self.device
     )
     self.dirty = torch.ones(num_envs, dtype=torch.bool, device=self.device)
+    # Deactivated (parked) humans keep their stale schedule fields; expiry
+    # must never fire for them or they would be revived mid-episode.
+    self.scheduled = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
     self.last_updated_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
 
     capsule_count = len(self.capsule_specs)
@@ -650,6 +653,7 @@ class OnlineComposedHumanSampler:
     self.current_translation_w[env_ids] = translation
     self.root_anchor_w[env_ids] = robot_positions
     self.dirty[env_ids] = True
+    self.scheduled[env_ids] = True
 
   def _update(self, global_time_s: float, env_ids: torch.Tensor) -> None:
     local_times = (
@@ -722,4 +726,5 @@ class OnlineComposedHumanSampler:
       global_time_s
       - self.global_intersection_times_s
     ) * self.playback_speed + self.local_intersection_times_s
-    return (local_times > self.total_durations_s + 1e-9).nonzero().flatten()
+    expired = (local_times > self.total_durations_s + 1e-9) & self.scheduled
+    return expired.nonzero().flatten()

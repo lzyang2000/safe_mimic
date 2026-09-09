@@ -6,10 +6,24 @@ from .implicit_estimator import (
   ImplicitStatePPO,
   ImplicitStatePpoAlgorithmCfg,
 )
+from .perceptive_lidar import (
+  AvoidanceAuxiliaryPPO,
+  AvoidanceAuxiliaryPpoAlgorithmCfg,
+  CircularAzimuthEncoder,
+  DirectionalFeatureEncoder,
+  PerceptiveLidarActor,
+  PerceptiveLidarModelCfg,
+)
 
 __all__ = [
+  "AvoidanceAuxiliaryPPO",
+  "AvoidanceAuxiliaryPpoAlgorithmCfg",
   "ImplicitStateActor",
   "ImplicitStateModelCfg",
   "ImplicitStatePPO",
   "ImplicitStatePpoAlgorithmCfg",
+  "CircularAzimuthEncoder",
+  "DirectionalFeatureEncoder",
+  "PerceptiveLidarActor",
+  "PerceptiveLidarModelCfg",
 ]

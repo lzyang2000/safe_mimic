@@ -195,17 +195,13 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--source-manifest",
     type=Path,
-    default=Path(
-      "artifacts/bones-seed/datasets/walk_punch_kick_1000/manifest.jsonl"
-    ),
+    default=Path("artifacts/bones-seed/datasets/walk_punch_kick_1000/manifest.jsonl"),
   )
   parser.add_argument("--transition-index", type=Path)
   parser.add_argument(
     "--output",
     type=Path,
-    default=Path(
-      "artifacts/bones-seed/datasets/standing_arm_actions_100"
-    ),
+    default=Path("artifacts/bones-seed/datasets/standing_arm_actions_100"),
   )
   parser.add_argument("--count", type=int, default=100)
   parser.add_argument("--neighbors", type=int, default=8)
@@ -239,9 +235,7 @@ def _category(text: str) -> str | None:
 
 
 def _stable_noise(seed: int, path_id: int) -> float:
-  digest = hashlib.blake2b(
-    f"{seed}:{path_id}".encode(), digest_size=8
-  ).digest()
+  digest = hashlib.blake2b(f"{seed}:{path_id}".encode(), digest_size=8).digest()
   return int.from_bytes(digest, "little") / float(2**64)
 
 
@@ -319,9 +313,7 @@ def main() -> None:
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite existing subset: {args.output}")
 
-  transition_index = args.transition_index or (
-    args.bank / "transition_index_v3"
-  )
+  transition_index = args.transition_index or (args.bank / "transition_index_v3")
   bank = CapsulePathBank(args.bank)
   paths = _read_jsonl(args.bank / "paths.jsonl")
   if len(paths) != len(bank):
@@ -350,15 +342,19 @@ def main() -> None:
     if bool(metrics.get("has_sustained_overhead_arm", False)):
       rejected["sustained_overhead_arm"] += 1
       continue
-    text = " ".join(
-      (
-        str(path["move_name"]),
-        str(path["description"]),
-        str(source.get("description", "")),
-        str(source.get("category", "")),
-        str(source.get("movement_type", "")),
+    text = (
+      " ".join(
+        (
+          str(path["move_name"]),
+          str(path["description"]),
+          str(source.get("description", "")),
+          str(source.get("category", "")),
+          str(source.get("movement_type", "")),
+        )
       )
-    ).casefold().replace("_", " ")
+      .casefold()
+      .replace("_", " ")
+    )
     if _contains_term(text, REJECT_TERMS):
       rejected["context_or_posture"] += 1
       continue
@@ -373,9 +369,7 @@ def main() -> None:
     root = np.asarray(
       bank.root_positions[int(path_id), :frame_count, :2], dtype=np.float32
     )
-    max_root_radius = float(
-      np.linalg.vector_norm(root - root[0], axis=-1).max()
-    )
+    max_root_radius = float(np.linalg.vector_norm(root - root[0], axis=-1).max())
     if max_root_radius > args.max_root_radius:
       rejected["root_drift"] += 1
       continue

@@ -17,7 +17,7 @@ and the complete resolution is recorded in `uv.lock`.
 
 ## Environment setup
 
-The plug-in registers eleven environments:
+The plug-in registers fourteen environments:
 
 | Task | Purpose | Crowd | Full action human | Policy input |
 |---|---|---|---|---|
@@ -26,12 +26,15 @@ The plug-in registers eleven environments:
 | `SafeMimic-Tracking-MotionLib-Unitree-G1` | First-cut generalized raw mimic teacher over the packed G1 library | none | none | state-estimation-free 154-value actor input |
 | `SafeMimic-Tracking-MotionLib-ImplicitState-Unitree-G1` | Learned-state ablation without direct translational state | none | none | 154 current values plus six predicted state values and a 16D history latent |
 | `SafeMimic-Tracking-MotionLib-StateEst-Unitree-G1` | Generalized raw mimic teacher with translational state estimation | none | none | upstream 160-value actor input |
-| `SafeMimic-Tracking-Obstacles-Unitree-G1-Lidar` | Crowd-only obstacle-aware training | 0--packed-capacity people, five collidable capsules each | none | tracking state + 1,080 LiDAR ranges |
-| `SafeMimic-Tracking-Crowd-Human-Unitree-G1-Lidar` | Recommended optimized training task | 0--packed-capacity people, five ray-only capsules each | one collidable 18-capsule human | tracking state + 1,080 LiDAR ranges |
-| `SafeMimic-Tracking-Flat-Unitree-G1-Lidar-Debug` | Visualize the complete scene with an upstream nominal checkpoint | five-capsule crowd | one 18-capsule human | unchanged upstream 160-value actor input |
-| `SafeMimic-Reference-Replay-Crowd-Human-Unitree-G1-Lidar-Demo` | Exact kinematic reference replay for developing the reference filter | five-capsule crowd | one 18-capsule human | unchanged upstream input; policy actions are ignored |
-| `SafeMimic-Reference-Filter-Crowd-Human-Unitree-G1-Lidar-Demo` | Tune deterministic planar and link/joint CBF reference filters | five-capsule crowd | one 18-capsule human | unchanged upstream input; policy actions are ignored |
-| `SafeMimic-Reference-Filter-Policy-Crowd-Human-Unitree-G1-Lidar-Demo` | Test whether the upstream nominal policy can track the filtered reference | five-capsule crowd | one 18-capsule human | unchanged upstream 160-value actor input |
+| `SafeMimic-Tracking-Obstacles-Unitree-G1-Lidar` | Crowd-only obstacle-aware training | 0--packed-capacity people, five collidable randomized capsules each | none | tracking state + 1,080 LiDAR ranges |
+| `SafeMimic-Tracking-Crowd-Human-Unitree-G1-Lidar` | Recommended optimized training task | 0--packed-capacity people, five ray-only randomized capsules each | one collidable 18-capsule human | tracking state + 1,080 LiDAR ranges |
+| `SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar` | From-scratch no-state avoidance policy with privileged safe-reference teaching | randomized 2--4 m ring, including empty scenes | one collidable 18-capsule human | 154 tracking + 2,160 dual-scan directional ranges + scan age |
+| `SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar-RangeRate` | Revised avoidance task with explicit closing speed and dense link-clearance shaping | randomized 2--4 m ring, including empty scenes | one moving 18-capsule human | 154 tracking + 1,080 directional ranges + 1,080 range rates + scan age |
+| `SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar-Sparse` | Fast low-ray-count ablation with the same directional encoding | randomized 2--4 m ring, including empty scenes | one collidable 18-capsule human | 154 tracking + 144 dual-scan directional ranges + scan age |
+| `SafeMimic-Tracking-Flat-Unitree-G1-Lidar-Debug` | Visualize the complete scene with an upstream nominal checkpoint | five-capsule randomized crowd | one 18-capsule human | unchanged upstream 160-value actor input |
+| `SafeMimic-Reference-Replay-Crowd-Human-Unitree-G1-Lidar-Demo` | Exact kinematic reference replay for developing the reference filter | five-capsule randomized crowd | one 18-capsule human | unchanged upstream input; policy actions are ignored |
+| `SafeMimic-Reference-Filter-Crowd-Human-Unitree-G1-Lidar-Demo` | Tune deterministic planar and link/joint CBF reference filters | five-capsule randomized crowd | one 18-capsule human | unchanged upstream input; policy actions are ignored |
+| `SafeMimic-Reference-Filter-Policy-Crowd-Human-Unitree-G1-Lidar-Demo` | Run the no-state policy on a live-aligned, filtered reference | five-capsule randomized crowd | one 18-capsule human | checkpoint-compatible 154-value no-state actor input |
 
 List the installed registrations with:
 
@@ -47,6 +50,79 @@ and save a checkpoint every 1,000 training iterations. Runs remain under
 uv run tensorboard --logdir logs/rsl_rl
 ```
 
+### From-scratch LiDAR avoidance policy
+
+The revised live-aligned task trains from random initialization on the example
+dance by default. Launch the 4,096-environment run with:
+
+```bash
+uv run train SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar-RangeRate \
+  --env.scene.num-envs 4096 \
+  --env.commands.motion.motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz
+```
+
+The task without explicit range rate remains registered as the paired baseline:
+
+```bash
+uv run train SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar \
+  --env.scene.num-envs 4096 \
+  --env.commands.motion.motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz
+```
+
+For a lower-fidelity ray-casting ablation, use the separate 120 x 4 task. It
+casts 96 rays per policy step while retaining the same directional actor input:
+
+```bash
+uv run train SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar-Sparse \
+  --env.scene.num-envs 4096 \
+  --env.commands.motion.motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz
+```
+
+The actor never receives measured base linear velocity, global reference-root
+position, filtered CBF commands, capsule geometry, or clean LiDAR. It receives
+the nominal 154-value live-aligned mimic input and a separate perceptive branch:
+the current completed scan and explicit closing speed, pooled to closest-return
+angular cells, plus scan age. Positive range rate means that the closest return
+in a cell is approaching. Both channels are computed from current and previous
+10 Hz scans. The full task uses `120` azimuth by `9` elevation cells; it still
+ray casts every point in each `185 x 27` scan before applying point-level noise
+and minimum pooling. The baseline supplies current and previous range instead,
+and the sparse `120 x 4` ablation retains `24 x 3` cells per scan. The 2,160
+directional values are projected to a 128D latent before fusion with the
+tracking MLP.
+
+Pooling happens once when the 10 Hz sensor publishes a complete scan, and that
+corrupted snapshot is held for all five 50 Hz policy steps. PPO therefore stores
+2,161 LiDAR values per transition rather than both 4,995-point raw scans. At
+4,096 environments and 24 rollout steps this reduces LiDAR rollout storage from
+3.66 GiB to 810.4 MiB without lowering ray-cast density or changing PPO settings.
+
+The critic and rewards can use the clean current scan, nearest-human state, and
+privileged filtered planar/joint targets. The filter is set to 0.8 m proactive
+clearance. The revised task adds a dense squared penalty when the existing
+robot-link CBF metric falls below 0.8 m; its weight is `-3.0`. This reuses the
+batched link calculation and does not add another geometry pass. Each reset
+samples a 2--4 m rounded-ring crowd with randomized density and 1.3--1.9 m human
+height; 25% of environments contain no people. The upstream PPO rollout,
+minibatch, epoch, and optimizer settings are unchanged. Crossing the analytical
+0.1 m robot-link-to-human clearance terminates the episode; physical contact
+sensors are disabled. A directional progress reward uses the privileged CBF
+escape velocity to teach whole-root translation without exposing that target to
+the actor. The inherited global root-position reward follows the filtered safe
+reference. All inherited reward weights remain at the upstream MJLab defaults,
+including `0.5` for global root position and orientation.
+
+Evaluate a revised checkpoint against a correctly blinded paired control with:
+
+```bash
+uv run python scripts/benchmark_policy_avoidance.py \
+  --task-variant range-rate \
+  --checkpoint logs/rsl_rl/safe_mimic_g1_live_aligned_lidar_avoidance_range_rate_link_reward/<run>/model_<iteration>.pt \
+  --motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
+  --scenarios primary-only \
+  --modes normal blind
+```
+
 ### Raw motion-library mimic teacher
 
 For a controlled single-motion comparison, train only the example dance with
@@ -60,7 +136,7 @@ uv run train SafeMimic-Tracking-ExampleDance-NoStateEst-Unitree-G1 \
 This uses mjlab's normal single-NPZ command rather than the packed motion
 library and logs separately under
 `safe_mimic_g1_example_dance_no_state_est_tracking`. The motion defaults to
-`/tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz`; override it with
+`artifacts/motions/lafan1_dance1_subject1_demo_motion.npz`; override it with
 `--env.commands.motion.motion-file /absolute/path/to/motion.npz` if the cache is
 elsewhere.
 
@@ -92,7 +168,7 @@ uv run train SafeMimic-Tracking-ExampleDance-ImplicitState-Unitree-G1 \
 ```
 
 This single-trajectory variant uses only
-`/tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz`. For the corresponding
+`artifacts/motions/lafan1_dance1_subject1_demo_motion.npz`. For the corresponding
 generalized experiment over all 27,514 training motions, use:
 
 ```bash
@@ -205,7 +281,7 @@ debugging, but the nominal policy cannot react to the people:
 ```bash
 uv run play SafeMimic-Tracking-Flat-Unitree-G1-Lidar-Debug \
   --checkpoint-file /tmp/mjlab_cache/demo_ckpt.pt \
-  --motion-file /tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz \
+  --motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
   --num-envs 1 \
   --viewer viser
 ```
@@ -226,7 +302,7 @@ policy. Run the privileged-geometry planar filter with:
 ```bash
 uv run play SafeMimic-Reference-Filter-Crowd-Human-Unitree-G1-Lidar-Demo \
   --checkpoint-file /tmp/mjlab_cache/demo_ckpt.pt \
-  --motion-file /tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz \
+  --motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
   --num-envs 1 \
   --viewer viser
 ```
@@ -284,23 +360,34 @@ oracle obstacle state with tracked LiDAR obstacles.
 
 ### Nominal policy tracking the filtered reference
 
-To leave physics and actuation enabled and test whether the pretrained nominal
-tracker can follow the filtered root and joint targets, run:
+To leave physics and actuation enabled and test the trained no-state tracker on
+the crowd and full action human, run:
 
 ```bash
 uv run play SafeMimic-Reference-Filter-Policy-Crowd-Human-Unitree-G1-Lidar-Demo \
-  --checkpoint-file /tmp/mjlab_cache/demo_ckpt.pt \
-  --motion-file /tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz \
+  --checkpoint-file logs/rsl_rl/safe_mimic_g1_example_dance_no_state_est_tracking/2026-08-28_01-12-15/model_29999.pt \
+  --motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
   --num-envs 1 \
   --viewer viser
 ```
 
-This task keeps the checkpoint-compatible 160-value actor observation and the
-normal 29-joint action interface. The filtered reference is exposed through the
-standard motion-command observations, but is never written into the simulated
-robot after reset. Gravity, contacts, actuators, rewards, and tracking
-terminations remain enabled. LiDAR is visualization-only for this nominal
-checkpoint; obstacle reactions come from the privileged reference filter.
+This task keeps the checkpoint-compatible 154-value no-state actor observation
+and normal 29-joint action interface. At every 50 Hz control step, the current
+source frame is translated onto the live robot root and yaw-rotated onto its
+tracking anchor before
+the planar and link/joint filters run. This removes accumulated global tracking
+drift from the filter's starting point while preserving the reference's local
+body pose and world-relative obstacle geometry. The filtered reference is never
+written into the simulated robot after reset. Gravity, contacts, actuators,
+rewards, and tracking terminations remain enabled. LiDAR is visualization-only;
+obstacle reactions come from the privileged reference filter.
+
+The existing no-state checkpoint does not observe reference-root translation or
+base linear velocity. It can therefore respond immediately to the filtered
+joint targets, but the planar root displacement is not directly controllable by
+this frozen actor. A learned step-away response will eventually require either
+a deployable local planar command input or conversion of the planar correction
+into a locomotion/joint-reference segment.
 
 ### Exact reference-replay baseline
 
@@ -310,7 +397,7 @@ error:
 ```bash
 uv run play SafeMimic-Reference-Replay-Crowd-Human-Unitree-G1-Lidar-Demo \
   --checkpoint-file /tmp/mjlab_cache/demo_ckpt.pt \
-  --motion-file /tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz \
+  --motion-file artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
   --num-envs 1 \
   --viewer viser
 ```
@@ -348,19 +435,22 @@ rules so it can serve as a clean reference-filter test fixture.
 mjlab supports batched ray casting but does not ship a spherical Mid-360 pattern.
 This package adds an interleaved body-mounted pattern and held-scan timing:
 
-- Training uses `180 x 6 = 1,080` rays over 360 degrees horizontally and
-  `0, -10, ..., -50` degrees vertically.
-- Five interleaved phases cast 216 rays per 50 Hz policy step and publish a
-  completed scan at 10 Hz. The observation is held for five policy steps.
+- The legacy obstacle tasks use a sparse `180 x 6 = 1,080` grid over 360 degrees
+  horizontally and `0, -10, ..., -50` degrees vertically.
+- The from-scratch avoidance task uses the true quarter-resolution
+  `185 x 27 = 4,995` grid: approximately 2 degrees horizontally and vertically.
+  Five interleaved phases cast 999 padded rays per 50 Hz policy step and publish
+  a completed scan at 10 Hz. The observation is held for five policy steps.
 - Ranges at or below 0.3 m and beyond 5 m are invalidated. This rejects the
   near-body region and limits the obstacle horizon.
-- The actor receives normalized noisy/delayed ranges; the critic receives clean
-  ranges and, in the combined task, vectors to the full action human.
+- The avoidance actor receives normalized, corrupted current and previous
+  completed scans plus scan age; its critic receives the clean current scan and
+  compact privileged human/teacher state.
 - The sensor is attached to the `mid360` MJCF site and uses the robot's full base
   orientation. Group-3 G1 proxies, the head-side pillars, and the shoulder plank
   reproduce hardware self-occlusion without physical contacts.
-- The debug task uses a denser `185 x 27 = 4,995`-ray snapshot for visual
-  inspection. Red Viser points are ray hits; ray arrows are disabled.
+- The debug task uses the same `185 x 27 = 4,995` grid for visual inspection.
+  Red Viser points are ray hits; ray arrows are disabled.
 - The exact replay demo uses the same dense pattern at 5 Hz by default, with a
   10 Hz configuration option. Its robot pose is written before every LiDAR phase.
 
@@ -532,7 +622,7 @@ contains all 3,000 entries, with separate `walk.jsonl`, `punch.jsonl`, and
 mirrored copies. Here, punch and kick are broad kinematic labels for suitable
 outward arm and leg actions; the punch filter rejects sustained overhead arms.
 
-## Online human trajectories
+## Packed human trajectories
 
 Prebuild every retained temporal event as a six-second-or-shorter capsule path:
 
@@ -560,13 +650,30 @@ uv run python scripts/build_skeleton_path_bank.py
 ```
 
 It stores only the 2,675 approved paths and the 24 joints required by the
-capsule fit. The current float16 bank is 257 MiB. At MJLab startup the complete
-bank and transition graph are copied to VRAM. Every environment samples a
-transition-matched `walk -> punch/kick -> walk` triplet at reset; root alignment,
-velocity-aware 0.2 s inertialization, forward kinematics, action-time crossing
-placement, and capsule fitting all run on CUDA. The full action human updates at
-the 50 Hz policy rate; LiDAR publication remains 10 Hz. There are no motion reads
-from SSD or system RAM during training.
+capsule fit. The current float16 source bank is 257 MiB. Compile all approved
+transition chains into direct-playback keypoints once:
+
+```bash
+uv run python scripts/build_packed_human_trajectory_bank.py \
+  --kind primary \
+  --output artifacts/bones-seed/datasets/packed_primary_human_trajectory_v1
+
+uv run python scripts/build_packed_human_trajectory_bank.py \
+  --kind crowd \
+  --output artifacts/bones-seed/datasets/packed_crowd_human_trajectory_v1
+```
+
+The primary output contains 8,808 transition-matched
+`walk -> punch/kick -> walk` chains and occupies 0.81 GiB in float16. The crowd
+output contains 800 three-action chains and occupies 0.038 GiB. Root alignment,
+velocity-aware 0.2 s inertialization, and the 24-joint forward kinematics run
+only in this offline compiler. At training startup the packed arrays are copied
+to VRAM. Runtime work is an indexed frame gather, interpolation, placement,
+capsule fit, and direct geom-pose write; it performs no motion reads from SSD or
+system RAM. The action human updates at 10 Hz, the crowd at 5 Hz, and LiDAR
+publishes at 10 Hz. Viser play configurations retain the original skeleton
+composer because it supplies the complete joint pose needed to skin the SOMA
+debug mesh.
 
 Only entry walks with enough natural root travel are sampled. At reset, the
 full human starts 2--4 m from the robot, its walking phase and playback rate are
@@ -577,12 +684,14 @@ training; the nominal calibration scene keeps its fixed 3 m, three-second
 approach.
 
 Transitions are inertialized after forward kinematics in aligned global skeleton
-space. This is important for the SOMA hierarchy, which splits root translation
-between synthetic `Root` and `Hips` joints: decaying offsets in the clips' local
-coordinate frames can otherwise create multi-meter jumps immediately after
-`walk -> action` and `action -> walk` boundaries. Reset placement reads the newly
-written robot root directly from `qpos`, so the crowd is centered on the robot
-even before mjlab's post-reset forward-kinematics pass.
+space during compilation. This is important for the SOMA hierarchy, which splits
+root translation between synthetic `Root` and `Hips` joints: decaying offsets in
+the clips' local coordinate frames can otherwise create multi-meter jumps after
+`walk -> action` and `action -> walk` boundaries. Runtime primary placement uses
+the packed root path to choose the 2--4 m entry frame without online bisection.
+Crowd reset placement reads the newly written robot root directly from `qpos`, so
+the ring is centered on the robot before mjlab's post-reset forward-kinematics
+pass.
 
 Do not split the dataset into thousands of `.npz` files. Fixed-shape bank arrays
 give one contiguous startup transfer and cheap indexed CUDA gathers; one-file
@@ -625,14 +734,15 @@ facing toward the robot without heading jitter. Each person's standing height is
 sampled uniformly from 1.3--1.9 m against the physical 1.7605 m SOMA bind mesh;
 width/depth proportions, proxy thickness, motion, phase, and 0.8--1.2x playback
 speed are independent per member. The same height randomization applies to the
-full action human. Pelvis XY is fixed to its slot while global-space inertialization connects
-arm actions continuously at 10 Hz in the crowd-only task and 5 Hz in the
-optimized combined task.
+full action human. Pelvis XY is fixed to its slot. Packed crowd chains use the
+same globally inertialized transitions and ping-pong at their endpoints, avoiding
+a loop-boundary pose teleport while updating at 5 Hz in the optimized task.
 
-Crowd ray casting uses five inflated animated proxies per person: a merged
-body/head capsule, left/right arm capsules, and left/right leg capsules. The
-optimized combined task uses those same proxies for analytical proximity while
-keeping them out of physical contact generation.
+Crowd ray casting currently uses five inflated animated capsules per
+person. Standing height, width/depth, radius scale, and radius margin make its
+dimensions independent per person. The optimized combined task uses that same
+proxy for analytical proximity while keeping it out of physical contact
+generation. The independently approaching/action human retains all 18 capsules.
 The full SOMA skin is visualization-only; Viser clusters it on a 2 cm grid and
 updates it at 5 Hz so debug rendering does not dictate training throughput.
 
@@ -643,7 +753,7 @@ Compile a single annotated clip to cross an mjlab robot reference:
 
 ```bash
 uv run python scripts/compile_human_intersection.py \
-  --robot-motion /tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz \
+  --robot-motion artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
   --family walk \
   --intersection-time 5
 ```
@@ -653,18 +763,17 @@ skeleton-level inertialization:
 
 ```bash
 uv run python scripts/compile_composed_human_intersection.py \
-  --robot-motion /tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz \
+  --robot-motion artifacts/motions/lafan1_dance1_subject1_demo_motion.npz \
   --action-family punch \
   --action-query jab \
   --intersection-time 8
 ```
 
-The offline command is useful for inspecting selected source clips. The CUDA
-runtime additionally filters for sufficiently long entry walks, solves the
-boundary-to-action starting phase, and performs its 0.2 s transition decay in
-aligned global skeleton space before capsule fitting. The action human reaches
-the predicted robot path at the midpoint of the annotated punch/kick segment;
-the walking segments provide the approach and departure.
+The offline command is useful for inspecting selected source clips. The packed
+runtime filters for sufficiently long approaches, gathers the closest natural
+2--4 m entry frame, and adjusts playback speed so the action human reaches the
+predicted robot path at the annotated punch/kick midpoint. The walking segments
+provide the approach and departure.
 
 ## Validation
 
@@ -676,7 +785,6 @@ uv run python -m pytest -q
 ```
 
 The transition regression tests check both exact boundary continuity and the
-post-boundary decay that previously produced visible root jumps. The existing
-4,096-environment measurements in [benchmark.md](benchmark.md) predate the
-current 50 Hz full-human update and should be treated as historical relative
-results until that combined case is rerun.
+post-boundary decay that previously produced visible root jumps. The current
+4,096-environment packed-playback result is recorded in
+[benchmark.md](benchmark.md).

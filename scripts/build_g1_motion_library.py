@@ -31,9 +31,7 @@ from safe_mimic.motions.g1_dataset import (
 
 def _parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument(
-    "--dataset-root", type=Path, default=Path("artifacts/bones-seed")
-  )
+  parser.add_argument("--dataset-root", type=Path, default=Path("artifacts/bones-seed"))
   parser.add_argument("--metadata", type=Path)
   parser.add_argument("--output-dir", type=Path)
   parser.add_argument("--workers", type=int, default=min(16, os.cpu_count() or 1))
@@ -117,9 +115,7 @@ def main() -> None:
   metadata_path = args.metadata or (
     args.dataset_root / "metadata/seed_metadata_v004.csv"
   )
-  output_dir = args.output_dir or (
-    args.dataset_root / "datasets/g1_general_mimic_v1"
-  )
+  output_dir = args.output_dir or (args.dataset_root / "datasets/g1_general_mimic_v1")
   if not 0.0 < args.validation_fraction < 1.0:
     raise ValueError("validation-fraction must be between zero and one")
   if args.workers < 1:
@@ -154,10 +150,7 @@ def main() -> None:
     f"Kinematic filtering {len(rows):,} metadata-compatible originals with "
     f"{args.workers} workers"
   )
-  tasks = [
-    (row["_resolved_csv_path"], row, lower, upper, cfg)
-    for row in rows
-  ]
+  tasks = [(row["_resolved_csv_path"], row, lower, upper, cfg) for row in rows]
   records: list[dict[str, object]] = []
   with ProcessPoolExecutor(max_workers=args.workers) as executor:
     for index, record in enumerate(executor.map(_worker, tasks, chunksize=16), 1):

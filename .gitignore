@@ -9,4 +9,8 @@ artifacts/*.pt
 artifacts/*.pth
 artifacts/*.onnx
 artifacts/*.npz
+artifacts/motions/
 artifacts/bones-seed/
+artifacts/renders/
+artifacts/videos
+artifacts/benchmarks/

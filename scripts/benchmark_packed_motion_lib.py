@@ -134,9 +134,7 @@ def main() -> None:
     "batch_size": args.batch_size,
     "iterations": args.iterations,
     "uniform_sample_batch_ms": elapsed * 1000.0 / args.iterations,
-    "uniform_sampled_frames_per_second": (
-      args.batch_size * args.iterations / elapsed
-    ),
+    "uniform_sampled_frames_per_second": (args.batch_size * args.iterations / elapsed),
     "adaptive_bins": adaptive_sampler.num_bins,
     "adaptive_resident_bytes": adaptive_sampler.resident_bytes,
     "adaptive_sample_batch_ms": adaptive_elapsed * 1000.0 / args.iterations,

@@ -16,9 +16,7 @@ import yaml
 from safe_mimic.motions.g1_dataset import is_stationary_jump_motion
 from safe_mimic.motions.g1_size_sample import grouped_distribution
 
-DEFAULT_LIBRARY = Path(
-  "artifacts/bones-seed/datasets/g1_wbc70_dance30_paired_10g_v1"
-)
+DEFAULT_LIBRARY = Path("artifacts/bones-seed/datasets/g1_wbc70_dance30_paired_10g_v1")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -38,9 +36,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in stream if line.strip()]
 
 
-def _write_jsonl_atomic(
-  path: Path, records: Sequence[Mapping[str, Any]]
-) -> None:
+def _write_jsonl_atomic(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
   temporary = path.with_suffix(path.suffix + ".tmp")
   with temporary.open("w", encoding="utf-8") as stream:
     for record in records:
@@ -151,8 +147,7 @@ def main() -> None:
       excluded[pair_id] = (_planar_excursion_m(root_pos_w), record)
     if index % 2000 == 0 or index == len(originals):
       print(
-        f"Scanned {index:,}/{len(originals):,} pairs; "
-        f"marked {len(excluded):,}",
+        f"Scanned {index:,}/{len(originals):,} pairs; marked {len(excluded):,}",
         flush=True,
       )
 
@@ -161,9 +156,7 @@ def main() -> None:
   retained_originals = [
     row for row in originals if str(row["pair_id"]) not in excluded_ids
   ]
-  retained_mirrors = [
-    row for row in mirrors if str(row["pair_id"]) not in excluded_ids
-  ]
+  retained_mirrors = [row for row in mirrors if str(row["pair_id"]) not in excluded_ids]
   excluded_clips = [row for row in records if str(row["pair_id"]) in excluded_ids]
   report = {
     "library": str(library),

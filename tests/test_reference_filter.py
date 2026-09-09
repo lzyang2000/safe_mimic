@@ -1,6 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from safe_mimic.tasks.kinematic_replay_command import (
+  PlanarFilteredReplayMotionCommand,
+)
 from safe_mimic.tasks.reference_filter import (
   LinkCbfReferenceFilterCfg,
   PlanarCbfReferenceFilterCfg,
@@ -15,6 +20,44 @@ from safe_mimic.tasks.reference_filter import (
   select_lookahead_arm_posture_velocity,
   update_posture_hold_time,
 )
+
+
+def test_link_filter_broad_phase_keeps_nearest_groups_and_full_primary() -> None:
+  command = SimpleNamespace(
+    _obstacle_geom_counts=(6, 2),
+    _link_filter_capsules_per_group=(2, None),
+    _link_filter_nearest_groups=(2, None),
+    num_envs=1,
+    device=torch.device("cpu"),
+  )
+  x = torch.arange(8, dtype=torch.float32)
+  centers = torch.zeros(1, 8, 3)
+  centers[0, :, 0] = x
+  quaternions = torch.zeros(1, 8, 4)
+  quaternions[..., 0] = 1.0
+  sizes = torch.ones(1, 8, 3)
+  velocities = centers + 10.0
+  clearance = torch.tensor([[10.0, 9.0, 1.0, 2.0, 3.0, 4.0, -1.0, -2.0]])
+  active = torch.ones(1, 8, dtype=torch.bool)
+
+  selected = PlanarFilteredReplayMotionCommand._select_link_filter_obstacles(
+    command,
+    centers,
+    quaternions,
+    sizes,
+    velocities,
+    clearance,
+    active,
+  )
+
+  selected_centers, selected_quaternions, selected_sizes, selected_velocities = (
+    selected
+  )
+  assert set(selected_centers[0, :4, 0].tolist()) == {2.0, 3.0, 4.0, 5.0}
+  assert selected_centers[0, 4:, 0].tolist() == [6.0, 7.0]
+  torch.testing.assert_close(selected_quaternions[..., 0], torch.ones(1, 6))
+  torch.testing.assert_close(selected_sizes, torch.ones(1, 6, 3))
+  torch.testing.assert_close(selected_velocities, selected_centers + 10.0)
 
 
 def test_joint_residual_limits_widen_only_arm_joints() -> None:
@@ -52,8 +95,7 @@ def test_lookahead_selects_arm_down_when_it_improves_future_clearance() -> None:
     standing_joint_pos=-torch.ones(1, 1),
   )
   candidate_links = torch.tensor(
-    [[[[0.0, 0.0, 0.0]], [[0.0, 0.0, -0.5]], [[0.0, 0.0, -0.5]],
-      [[0.0, 0.0, 0.0]]]]
+    [[[[0.0, 0.0, 0.0]], [[0.0, 0.0, -0.5]], [[0.0, 0.0, -0.5]], [[0.0, 0.0, 0.0]]]]
   )
   common = {
     "cfg": cfg,
@@ -117,6 +159,81 @@ def test_arm_posture_candidates_keep_left_and_right_choices_independent() -> Non
   )
 
 
+def test_cached_posture_masks_preserve_candidate_outputs() -> None:
+  cfg = LinkCbfReferenceFilterCfg(
+    body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+    standing_posture_gain=1.0,
+    max_standing_velocity_correction_rps=1.0,
+  )
+  joint_names = (
+    "left_shoulder_roll_joint",
+    "right_elbow_joint",
+    "waist_yaw_joint",
+  )
+  joint_pos = torch.tensor([[0.7, -0.4, 0.2], [-0.2, 0.9, -0.5]])
+  standing_joint_pos = torch.zeros_like(joint_pos)
+  derived = arm_posture_velocity_candidates(
+    cfg,
+    joint_names=joint_names,
+    joint_pos=joint_pos,
+    standing_joint_pos=standing_joint_pos,
+  )
+  posture_mask = torch.tensor([True, True, False])
+  cached = arm_posture_velocity_candidates(
+    cfg,
+    joint_names=joint_names,
+    joint_pos=joint_pos,
+    standing_joint_pos=standing_joint_pos,
+    posture_joint_mask=posture_mask,
+    left_joint_mask=torch.tensor([True, False, False]),
+    right_joint_mask=torch.tensor([False, True, False]),
+  )
+
+  torch.testing.assert_close(cached, derived, rtol=0.0, atol=0.0)
+
+
+def test_cached_arm_link_mask_preserves_lookahead_output() -> None:
+  cfg = LinkCbfReferenceFilterCfg(
+    body_names=("left_wrist_yaw_link", "torso_link"),
+    standing_posture_gain=1.0,
+    max_standing_velocity_correction_rps=1.0,
+  )
+  candidates = arm_posture_velocity_candidates(
+    cfg,
+    joint_names=("left_shoulder_roll_joint",),
+    joint_pos=torch.zeros(1, 1),
+    standing_joint_pos=-torch.ones(1, 1),
+  )
+  common = {
+    "cfg": cfg,
+    "link_names": cfg.body_names,
+    "candidate_joint_velocities": candidates,
+    "candidate_link_positions_w": torch.tensor(
+      [
+        [
+          [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+          [[0.0, 0.0, -0.5], [0.0, 0.0, 0.0]],
+          [[0.0, 0.0, -0.5], [0.0, 0.0, 0.0]],
+          [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        ]
+      ]
+    ),
+    "nearest_obstacle_ids": torch.zeros(1, 2, dtype=torch.long),
+    "link_active": torch.tensor([[True, False]]),
+    "capsule_centers_w": torch.tensor([[[0.5, 0.0, 0.0]]]),
+    "capsule_quaternions_w": torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]),
+    "capsule_sizes": torch.tensor([[[0.1, 0.0, 0.0]]]),
+    "obstacle_velocities_w": torch.zeros(1, 1, 3),
+  }
+  derived = select_lookahead_arm_posture_velocity(**common)
+  cached = select_lookahead_arm_posture_velocity(
+    **common,
+    arm_link_mask=torch.tensor([True, False]),
+  )
+
+  torch.testing.assert_close(cached, derived, rtol=0.0, atol=0.0)
+
+
 def test_default_link_and_posture_activation_share_proactive_margin() -> None:
   cfg = LinkCbfReferenceFilterCfg(body_names=("left_wrist_yaw_link",))
 
@@ -177,9 +294,7 @@ def test_lookahead_wrist_improvement_is_not_masked_by_unchanged_shoulder() -> No
     nearest_obstacle_ids=torch.tensor([[0, 1]]),
     link_active=torch.tensor([[True, True]]),
     capsule_centers_w=torch.tensor([[[0.2, 0.0, 0.0], [1.3, 0.0, 0.0]]]),
-    capsule_quaternions_w=torch.tensor(
-      [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]]
-    ),
+    capsule_quaternions_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]]),
     capsule_sizes=torch.tensor([[[0.1, 0.0, 0.0], [0.1, 0.0, 0.0]]]),
     obstacle_velocities_w=torch.zeros(1, 2, 3),
   )

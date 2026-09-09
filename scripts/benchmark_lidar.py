@@ -35,7 +35,10 @@ from safe_mimic.tasks.env_cfg import (
   HUMAN_ENTITY_NAME,
   HUMAN_MOTION_EVENT_NAME,
   LIDAR_SENSOR_NAME,
+  LIVOX_SNAPSHOT_AZIMUTH_SAMPLES,
+  LIVOX_SNAPSHOT_ELEVATIONS_DEG,
   unitree_g1_crowd_and_human_tracking_env_cfg,
+  unitree_g1_lidar_avoidance_tracking_env_cfg,
   unitree_g1_nominal_lidar_debug_env_cfg,
   unitree_g1_obstacle_aware_tracking_env_cfg,
 )
@@ -71,9 +74,7 @@ def _full_human_event_cfg(entity_name: str) -> EventTermCfg:
   )
 
 
-def _full_human_contact_cfg(
-  entity_name: str, sensor_name: str
-) -> ContactSensorCfg:
+def _full_human_contact_cfg(entity_name: str, sensor_name: str) -> ContactSensorCfg:
   return ContactSensorCfg(
     name=sensor_name,
     primary=ContactMatch(
@@ -81,9 +82,7 @@ def _full_human_contact_cfg(
       pattern=rf"{HUMAN_CAPSULE_BODY_PREFIX}.*",
       entity=entity_name,
     ),
-    secondary=ContactMatch(
-      mode="subtree", pattern="pelvis", entity="robot"
-    ),
+    secondary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
     fields=("found", "force"),
     reduce="maxforce",
     num_slots=1,
@@ -95,22 +94,14 @@ def _single_human_obstacle_cfg():
   """Replace the dense crowd with one full 18-capsule crossing human."""
 
   cfg = unitree_g1_obstacle_aware_tracking_env_cfg(play=True)
-  cfg.scene.entities[HUMAN_ENTITY_NAME] = EntityCfg(
-    spec_fn=get_soma_capsule_human_spec
-  )
-  cfg.events[HUMAN_MOTION_EVENT_NAME] = _full_human_event_cfg(
-    HUMAN_ENTITY_NAME
-  )
-  critic_params = cfg.observations["critic"].terms[
-    "human_capsule_vectors_b"
-  ].params
+  cfg.scene.entities[HUMAN_ENTITY_NAME] = EntityCfg(spec_fn=get_soma_capsule_human_spec)
+  cfg.events[HUMAN_MOTION_EVENT_NAME] = _full_human_event_cfg(HUMAN_ENTITY_NAME)
+  critic_params = cfg.observations["critic"].terms["human_capsule_vectors_b"].params
   reward_params = cfg.rewards["human_proximity"].params
   for params in (critic_params, reward_params):
     params.pop("capsules_per_group", None)
     params.pop("nearest_groups", None)
-  contact = _full_human_contact_cfg(
-    HUMAN_ENTITY_NAME, HUMAN_CONTACT_SENSOR_NAME
-  )
+  contact = _full_human_contact_cfg(HUMAN_ENTITY_NAME, HUMAN_CONTACT_SENSOR_NAME)
   cfg.scene.sensors = tuple(
     contact if sensor.name == HUMAN_CONTACT_SENSOR_NAME else sensor
     for sensor in (cfg.scene.sensors or ())
@@ -202,6 +193,7 @@ def main() -> None:
       "combined-ray-only",
       "debug",
       "obstacle",
+      "avoidance",
     ),
     default="debug",
   )
@@ -218,7 +210,7 @@ def main() -> None:
     help="profile without the crowd analytical-proximity reward",
   )
   parser.add_argument(
-    "--resolution", choices=("quarter", "full"), default="quarter"
+    "--resolution", choices=("sparse", "quarter", "full"), default="sparse"
   )
   parser.add_argument("--motion-file", required=True)
   parser.add_argument("--num-envs", type=int, default=4096)
@@ -244,6 +236,10 @@ def main() -> None:
     cfg = _ray_only_combined_human_obstacle_cfg()
   elif args.task == "debug":
     cfg = unitree_g1_nominal_lidar_debug_env_cfg(play=True)
+  elif args.task == "avoidance":
+    if args.case != "lidar":
+      raise ValueError("the avoidance task requires LiDAR")
+    cfg = unitree_g1_lidar_avoidance_tracking_env_cfg(play=False)
   else:
     cfg = unitree_g1_obstacle_aware_tracking_env_cfg(play=True)
   if args.disable_crowd_critic:
@@ -263,7 +259,8 @@ def main() -> None:
   if primary_event is not None:
     primary_event.params["show_mesh"] = False
   cfg.scene.num_envs = args.num_envs
-  cfg.terminations = {}
+  if args.task != "avoidance":
+    cfg.terminations = {}
 
   motion = cfg.commands["motion"]
   if not isinstance(motion, MotionCommandCfg):
@@ -284,7 +281,12 @@ def main() -> None:
           raise TypeError("expected a HeldScanRayCastSensorCfg")
         sensor.scan_period = 1.0 / args.scan_hz
         pattern_updates: dict[str, object] = {"phases": 50 // args.scan_hz}
-        if args.resolution == "full":
+        if args.resolution == "quarter":
+          pattern_updates.update(
+            azimuth_samples=LIVOX_SNAPSHOT_AZIMUTH_SAMPLES,
+            elevation_angles_deg=LIVOX_SNAPSHOT_ELEVATIONS_DEG,
+          )
+        elif args.resolution == "full":
           pattern_updates.update(
             azimuth_samples=FULL_RESOLUTION_AZIMUTH_SAMPLES,
             elevation_angles_deg=FULL_RESOLUTION_ELEVATIONS_DEG,
@@ -306,9 +308,7 @@ def main() -> None:
     )
     crowd = env.scene[HUMAN_ENTITY_NAME]
     center_error = (crowd.data.geom_pos_w - expected_centers).abs().max().item()
-    quaternion_dot = (
-      crowd.data.geom_quat_w * expected_quaternions
-    ).sum(dim=-1).abs()
+    quaternion_dot = (crowd.data.geom_quat_w * expected_quaternions).sum(dim=-1).abs()
     quaternion_error = (1.0 - quaternion_dot).abs().max().item()
     geom_ids = crowd.indexing.geom_ids.to(dtype=torch.long)
     expected_sizes = torch.stack(
@@ -320,8 +320,8 @@ def main() -> None:
       dim=-1,
     ).reshape(args.num_envs, -1, 3)
     size_error = (
-      env.sim.model.geom_size[:, geom_ids] - expected_sizes
-    ).abs().max().item()
+      (env.sim.model.geom_size[:, geom_ids] - expected_sizes).abs().max().item()
+    )
     print(
       "CROWD_GEOMETRY_CHECK "
       f"direct_geom_poses={crowd_motion._direct_geom_poses} "
@@ -344,9 +344,7 @@ def main() -> None:
       if torch.any(current != previous).item():
         changed_steps.append(step)
       previous.copy_(current)
-    print(
-      f"HOLD_CHECK steps={args.verify_hold_steps} changed_steps={changed_steps}"
-    )
+    print(f"HOLD_CHECK steps={args.verify_hold_steps} changed_steps={changed_steps}")
     env.close()
     return
 

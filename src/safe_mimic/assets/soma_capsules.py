@@ -12,6 +12,7 @@ from safe_mimic.motions.human_capsules import (
 
 HUMAN_CAPSULE_BODY_PREFIX = "human_capsule_"
 HUMAN_CAPSULE_GEOM_PREFIX = "human_capsule_geom_"
+HUMAN_RAY_BODY_NAME = "human_ray_only_root"
 HUMAN_CROWD_BODY_PREFIX = "human_crowd_"
 HUMAN_CROWD_GEOM_PREFIX = "human_crowd_geom_"
 HUMAN_CROWD_RAY_BODY_NAME = "human_crowd_ray_only_root"
@@ -114,16 +115,39 @@ def _add_capsule_member(
   )
 
 
-def get_soma_capsule_human_spec() -> mujoco.MjSpec:
-  """Create 18 root-level mocap bodies driven by the online path sampler.
+def get_soma_capsule_human_spec(*, collidable: bool = True) -> mujoco.MjSpec:
+  """Create the articulated-capsule human driven by the online path sampler.
 
-  The human uses collision type bit 1 and no affinity. G1 collision geoms opt
-  into that bit, so the human contacts the robot without contacting itself or
-  the ground. Geom group 3 keeps every capsule visible to the LiDAR ray caster
-  while the viewers hide the proxy geometry by default.
+  Collidable humans use collision type bit 1 and no affinity. G1 collision
+  geoms opt into that bit, so the human contacts the robot without contacting
+  itself or the ground. With ``collidable=False``, the capsules remain in geom
+  group 3 and therefore visible to LiDAR without generating physical contacts.
+  That ray-only variant stores all geoms under one mocap body; the motion event
+  writes their per-environment local transforms directly.
   """
 
   spec = mujoco.MjSpec()
+  if not collidable:
+    ray_only_root = spec.worldbody.add_body(name=HUMAN_RAY_BODY_NAME, mocap=True)
+    for capsule in SOMA_CAPSULE_SPECS:
+      half_length = _DEFAULT_HALF_LENGTH_M[capsule.name]
+      geom_type = (
+        mujoco.mjtGeom.mjGEOM_SPHERE
+        if capsule.end_joint is None
+        else mujoco.mjtGeom.mjGEOM_CAPSULE
+      )
+      ray_only_root.add_geom(
+        name=human_capsule_geom_name(capsule.name),
+        type=geom_type,
+        pos=(0.0, 0.0, HUMAN_INACTIVE_HEIGHT_M),
+        size=(capsule.radius_m, half_length, 0.0),
+        group=HUMAN_RAYCAST_GROUP,
+        contype=0,
+        conaffinity=0,
+        rgba=(0.8, 0.32, 0.22, HUMAN_PROXY_RENDER_ALPHA),
+      )
+    return spec
+
   for index, capsule in enumerate(SOMA_CAPSULE_SPECS):
     _add_capsule_member(
       spec,
@@ -131,6 +155,7 @@ def get_soma_capsule_human_spec() -> mujoco.MjSpec:
       geom_name=human_capsule_geom_name(capsule.name),
       capsule=capsule,
       color_index=index,
+      collidable=True,
     )
   return spec
 

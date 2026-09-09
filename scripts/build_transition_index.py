@@ -161,13 +161,11 @@ def main() -> None:
     if family == "walk" and features.root_path_length_m[path_id] < args.min_walk_path:
       reasons[path_id].append("insufficient_root_path")
     if (
-      family == "punch"
-      and features.hand_excursion_m[path_id] < args.min_hand_excursion
+      family == "punch" and features.hand_excursion_m[path_id] < args.min_hand_excursion
     ):
       reasons[path_id].append("insufficient_hand_excursion")
     if (
-      family == "kick"
-      and features.foot_excursion_m[path_id] < args.min_foot_excursion
+      family == "kick" and features.foot_excursion_m[path_id] < args.min_foot_excursion
     ):
       reasons[path_id].append("insufficient_foot_excursion")
     if not args.allow_props and _has_prop(record):

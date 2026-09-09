@@ -29,9 +29,7 @@ from safe_mimic.motions.g1_size_sample import (
 
 def _parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument(
-    "--dataset-root", type=Path, default=Path("artifacts/bones-seed")
-  )
+  parser.add_argument("--dataset-root", type=Path, default=Path("artifacts/bones-seed"))
   parser.add_argument("--metadata", type=Path)
   parser.add_argument("--output-dir", type=Path)
   parser.add_argument("--target-gib", type=float, default=5.0)
@@ -158,9 +156,7 @@ def main() -> None:
   )
   rows = list(load_metadata_rows(metadata_path))
   metadata_by_path = {
-    str(row.get("move_g1_path", "")): row
-    for row in rows
-    if row.get("move_g1_path")
+    str(row.get("move_g1_path", "")): row for row in rows if row.get("move_g1_path")
   }
 
   candidates: list[dict[str, Any]] = []
@@ -173,8 +169,7 @@ def main() -> None:
       continue
     mirror = _mirror_csv_path(relative)
     if (
-      not (args.dataset_root / mirror).is_file()
-      or str(mirror) not in metadata_by_path
+      not (args.dataset_root / mirror).is_file() or str(mirror) not in metadata_by_path
     ):
       originals_without_mirror += 1
       continue
@@ -195,8 +190,7 @@ def main() -> None:
     target_by_pool = {"unfiltered": target_bytes}
   else:
     wbc_manifest = args.wbc_manifest or (
-      Path.home()
-      / "twist2/seed_g1_cbf_standing_payload/seed_dataset_filtered.yaml"
+      Path.home() / "twist2/seed_g1_cbf_standing_payload/seed_dataset_filtered.yaml"
     )
     dance_manifest = args.dance_manifest or (
       args.dataset_root / "datasets/g1_general_mimic_v1/filtered_all.jsonl"
@@ -207,12 +201,9 @@ def main() -> None:
       "wbc": [
         record
         for record in candidates
-        if record["csv_path"] in wbc_paths
-        and record["csv_path"] not in dance_paths
+        if record["csv_path"] in wbc_paths and record["csv_path"] not in dance_paths
       ],
-      "dance": [
-        record for record in candidates if record["csv_path"] in dance_paths
-      ],
+      "dance": [record for record in candidates if record["csv_path"] in dance_paths],
     }
     wbc_target = round(target_bytes * args.wbc_share)
     target_by_pool = {
@@ -252,9 +243,7 @@ def main() -> None:
     mirrors.append(mirror_record)
 
   combined = [
-    record
-    for pair in zip(originals, mirrors, strict=True)
-    for record in pair
+    record for pair in zip(originals, mirrors, strict=True) for record in pair
   ]
   source_package = grouped_distribution(candidates, "package")
   sample_package = grouped_distribution(originals, "package")
@@ -274,8 +263,7 @@ def main() -> None:
       "selected_pairs": len(selected_by_pool[pool_name]),
       "target_payload_bytes": target_by_pool[pool_name],
       "selected_payload_bytes": sum(
-        int(record["tracker_payload_bytes"])
-        for record in selected_by_pool[pool_name]
+        int(record["tracker_payload_bytes"]) for record in selected_by_pool[pool_name]
       ),
     }
     for pool_name in source_pools
@@ -283,13 +271,9 @@ def main() -> None:
   distribution_fidelity: dict[str, float] = {}
   for pool_name in source_pools:
     source_pool_package = grouped_distribution(source_pools[pool_name], "package")
-    sample_pool_package = grouped_distribution(
-      selected_by_pool[pool_name], "package"
-    )
+    sample_pool_package = grouped_distribution(selected_by_pool[pool_name], "package")
     source_pool_category = grouped_distribution(source_pools[pool_name], "category")
-    sample_pool_category = grouped_distribution(
-      selected_by_pool[pool_name], "category"
-    )
+    sample_pool_category = grouped_distribution(selected_by_pool[pool_name], "category")
     prefix = "" if args.policy == "unfiltered" else f"{pool_name}_"
     distribution_fidelity[f"{prefix}max_package_payload_share_error"] = (
       _max_share_error(source_pool_package, sample_pool_package, "payload_share")
@@ -297,11 +281,11 @@ def main() -> None:
     distribution_fidelity[f"{prefix}max_category_payload_share_error"] = (
       _max_share_error(source_pool_category, sample_pool_category, "payload_share")
     )
-    distribution_fidelity[f"{prefix}max_package_clip_share_error"] = (
-      _max_share_error(source_pool_package, sample_pool_package, "clip_share")
+    distribution_fidelity[f"{prefix}max_package_clip_share_error"] = _max_share_error(
+      source_pool_package, sample_pool_package, "clip_share"
     )
-    distribution_fidelity[f"{prefix}max_category_clip_share_error"] = (
-      _max_share_error(source_pool_category, sample_pool_category, "clip_share")
+    distribution_fidelity[f"{prefix}max_category_clip_share_error"] = _max_share_error(
+      source_pool_category, sample_pool_category, "clip_share"
     )
 
   summary = {
@@ -337,9 +321,7 @@ def main() -> None:
       "combined_payload_gib": (original_bytes + mirror_bytes) / 1024**3,
       "dance_pairs": sum(bool(record["is_dance"]) for record in originals),
       "train_pairs": sum(record["split"] == "train" for record in originals),
-      "validation_pairs": sum(
-        record["split"] == "validation" for record in originals
-      ),
+      "validation_pairs": sum(record["split"] == "validation" for record in originals),
       "metadata_filter_outcomes": dict(rejection_counts.most_common()),
       "pool_payload_shares": {
         pool_name: int(pool["selected_payload_bytes"]) / original_bytes

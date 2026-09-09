@@ -60,9 +60,7 @@ def _load_path_metadata(path: Path) -> list[dict[str, object]]:
   return records
 
 
-def _load_segment(
-  record: dict[str, object], dataset_root: Path, output_fps: float
-):
+def _load_segment(record: dict[str, object], dataset_root: Path, output_fps: float):
   start_time_s = float(record["source_start_time_s"])
   end_time_s = float(record["source_end_time_s"])
   return load_bvh_window(
@@ -93,8 +91,7 @@ def main() -> None:
     and (args.action_path_id is None or path_id == args.action_path_id)
     and (
       args.action_query is None
-      or args.action_query.casefold()
-      in str(records[path_id]["description"]).casefold()
+      or args.action_query.casefold() in str(records[path_id]["description"]).casefold()
     )
   ]
   if not candidates:
@@ -120,9 +117,9 @@ def main() -> None:
     transition_duration_s=args.transition_duration,
   )
   action_start_frame = len(source_motions[0].positions_m) - 1
-  action_target_frame = action_start_frame + (
-    len(source_motions[1].positions_m) - 1
-  ) // 2
+  action_target_frame = (
+    action_start_frame + (len(source_motions[1].positions_m) - 1) // 2
+  )
   intersection_phase = action_target_frame / (len(composed.positions_m) - 1)
 
   robot = load_mjlab_robot_trajectory(

@@ -13,6 +13,7 @@ from safe_mimic.assets.g1 import (
 )
 from safe_mimic.sensing.held_scan import HeldScanRayCastSensorCfg
 from safe_mimic.tasks.env_cfg import (
+  HUMAN_MOTION_EVENT_NAME,
   LIDAR_AZIMUTH_SAMPLES,
   LIDAR_ELEVATIONS_DEG,
   LIDAR_MAX_DISTANCE_M,
@@ -22,23 +23,83 @@ from safe_mimic.tasks.env_cfg import (
   LIDAR_SENSOR_NAME,
   LIVOX_SNAPSHOT_AZIMUTH_SAMPLES,
   LIVOX_SNAPSHOT_ELEVATION_SAMPLES,
+  PRIMARY_HUMAN_CONTACT_SENSOR_NAME,
   PRIMARY_HUMAN_ENTITY_NAME,
   PRIMARY_HUMAN_EVENT_NAME,
+  PROTOTYPE_LIDAR_AZIMUTH_SAMPLES,
+  PROTOTYPE_LIDAR_ELEVATIONS_DEG,
   unitree_g1_kinematic_reference_lidar_demo_env_cfg,
+  unitree_g1_lidar_avoidance_tracking_env_cfg,
+  unitree_g1_lidar_range_rate_avoidance_tracking_env_cfg,
   unitree_g1_nominal_lidar_debug_env_cfg,
   unitree_g1_obstacle_aware_tracking_env_cfg,
   unitree_g1_reference_filter_lidar_demo_env_cfg,
   unitree_g1_reference_filter_policy_lidar_demo_env_cfg,
+  unitree_g1_sparse_lidar_avoidance_tracking_env_cfg,
 )
+from safe_mimic.tasks.human_capsule_event import HumanCapsuleMotion
 from safe_mimic.tasks.kinematic_replay_command import (
   KinematicReplayMotionCommand,
   KinematicReplayMotionCommandCfg,
+  PlanarFilteredReplayMotionCommand,
   PlanarFilteredReplayMotionCommandCfg,
+  _apply_planar_reference_alignment,
+  _planar_reference_alignment,
+)
+from safe_mimic.tasks.packed_human_event import (
+  PackedHumanCapsuleCrowdMotion,
+  PackedHumanCapsuleMotion,
 )
 
 EXPECTED_HEAD_SIDE_HALF_SIZE = (0.011, 0.0065, 0.0375)
 EXPECTED_HEAD_SIDE_X = 0.0402835
 EXPECTED_HEAD_SIDE_Z = 0.37868
+
+
+def test_primary_human_velocity_diagnostic_uses_pose_update_interval(
+  capsys: pytest.CaptureFixture[str],
+) -> None:
+  motion = HumanCapsuleMotion.__new__(HumanCapsuleMotion)
+  motion.print_velocity = True
+  motion.velocity_print_interval_s = 0.5
+  motion._velocity_previous_root_w = torch.zeros(1, 3)
+  motion._velocity_previous_time_s = torch.zeros(1)
+  motion._velocity_valid = torch.zeros(1, dtype=torch.bool)
+  motion._velocity_measurement_valid = torch.zeros(1, dtype=torch.bool)
+  motion._velocity_w = torch.zeros(1, 3)
+  motion._velocity_closing_speed_mps = torch.zeros(1)
+  motion._velocity_distance_m = torch.zeros(1)
+  motion._velocity_last_print_s = -float("inf")
+  motion.robot_entity_name = "robot"
+  poses = SimpleNamespace(
+    root_positions_w=torch.zeros(1, 3),
+    active=torch.ones(1, dtype=torch.bool),
+  )
+  motion.sampler = SimpleNamespace(
+    _poses=poses,
+    playback_speed=torch.tensor([1.25]),
+  )
+  robot_data = SimpleNamespace(
+    root_link_pos_w=torch.tensor([[2.0, 0.0, 0.0]]),
+    root_link_lin_vel_w=torch.zeros(1, 3),
+  )
+  motion._env = SimpleNamespace(scene={"robot": SimpleNamespace(data=robot_data)})
+  env_ids = torch.tensor([0])
+
+  motion._update_velocity_diagnostic(env_ids, 0.0)
+  assert capsys.readouterr().out == ""
+  poses.root_positions_w[0, 0] = 0.2
+  motion._update_velocity_diagnostic(env_ids, 0.1)
+
+  output = capsys.readouterr().out
+  assert "v_w=(+2.00, +0.00, +0.00) m/s" in output
+  assert "speed_xy=2.00 m/s" in output
+  assert "closing=+2.00 m/s" in output
+  assert "playback=1.25x" in output
+  assert motion._velocity_label_text(0) == (
+    "human v=(+2.00, +0.00, +0.00) m/s\n"
+    "speed=2.00  closing=+2.00  distance=1.80 m"
+  )
 
 
 def _pillar_quat(*, roll_deg: float) -> tuple[float, float, float, float]:
@@ -87,6 +148,8 @@ def test_nominal_debug_task_preserves_policy_observation_contract() -> None:
   assert primary.params["update_hz"] == 50.0
   assert primary.params["min_human_height_m"] == 1.3
   assert primary.params["max_human_height_m"] == 1.9
+  assert primary.params["print_velocity"] is True
+  assert primary.params["velocity_print_interval_s"] == 0.5
   for group_name in upstream.observations:
     assert (
       debug.observations[group_name].terms.keys()
@@ -159,6 +222,148 @@ def test_training_task_interleaves_sparse_pattern_at_10_hz() -> None:
   assert isinstance(lidar, HeldScanRayCastSensorCfg)
   assert lidar.pattern.rays_per_phase == 216
   assert lidar.scan_period == 0.1
+
+
+def test_new_avoidance_task_uses_pooled_dense_dual_scan_and_raw_command() -> None:
+  cfg = unitree_g1_lidar_avoidance_tracking_env_cfg()
+  upstream = unitree_g1_flat_tracking_env_cfg(has_state_estimation=False)
+  motion = cfg.commands["motion"]
+  assert isinstance(motion, PlanarFilteredReplayMotionCommandCfg)
+  assert motion.write_reference_to_sim is False
+  assert motion.align_reference_to_robot_each_step is True
+  assert motion.expose_filtered_command is False
+  assert motion.planar_filter.safe_clearance_m == 0.8
+  assert motion.link_filter.safe_clearance_m == 0.8
+  assert motion.link_filter_capsules_per_group == (5, None)
+  assert motion.link_filter_nearest_groups == (8, None)
+
+  actor_terms = cfg.observations["actor"].terms
+  assert "motion_anchor_pos_b" not in actor_terms
+  assert "base_lin_vel" not in actor_terms
+  assert LIDAR_SENSOR_NAME not in actor_terms
+  assert tuple(cfg.observations["lidar"].terms) == (
+    "directional_scan_pair",
+    "scan_age",
+  )
+  actor_lidar = cfg.observations["lidar"].terms["directional_scan_pair"]
+  assert actor_lidar.params["azimuth_bins"] == 120
+  assert actor_lidar.params["elevation_bins"] == 9
+  critic_terms = cfg.observations["critic"].terms
+  critic_lidar = critic_terms[LIDAR_SENSOR_NAME]
+  assert critic_lidar.func.__name__ == "CachedDirectionalLidarRanges"
+  assert critic_lidar.params["azimuth_bins"] == 24
+  assert critic_lidar.params["elevation_bins"] == 3
+  assert "filtered_planar_velocity_b" in critic_terms
+  assert "filtered_joint_command" in critic_terms
+  assert "crowd_capsule_vectors_b" in critic_terms
+
+  lidar = next(
+    sensor for sensor in cfg.scene.sensors if sensor.name == LIDAR_SENSOR_NAME
+  )
+  assert isinstance(lidar, HeldScanRayCastSensorCfg)
+  assert lidar.pattern.num_rays == 4_995
+  assert lidar.pattern.rays_per_phase == 999
+  assert lidar.pattern.phases == 5
+  assert lidar.scan_period == 0.1
+
+  assert cfg.events[HUMAN_MOTION_EVENT_NAME].params["obstacle_free_probability"] == 0.25
+  assert cfg.events[HUMAN_MOTION_EVENT_NAME].func is PackedHumanCapsuleCrowdMotion
+  assert cfg.events[PRIMARY_HUMAN_EVENT_NAME].func is PackedHumanCapsuleMotion
+  assert (
+    cfg.events[PRIMARY_HUMAN_EVENT_NAME].params["use_shared_obstacle_free_mask"] is True
+  )
+  assert cfg.events[PRIMARY_HUMAN_EVENT_NAME].params["update_hz"] == 10.0
+  primary_params = cfg.events[PRIMARY_HUMAN_EVENT_NAME].params
+  assert primary_params["encounter_sampling"] == "ttc"
+  assert primary_params["min_initial_spawn_radius_m"] == 0.75
+  assert primary_params["max_initial_spawn_radius_m"] == 4.0
+  assert primary_params["min_intersection_delay_s"] == 0.5
+  assert primary_params["max_intersection_delay_s"] == 4.0
+  for name, reward in upstream.rewards.items():
+    assert cfg.rewards[name].weight == reward.weight
+  assert cfg.rewards["human_proximity"].params["safe_clearance"] == 0.8
+  assert cfg.rewards["primary_human_proximity"].params["safe_clearance"] == 0.8
+  assert "safe_planar_velocity" in cfg.rewards
+  assert "filtered_joint_position" in cfg.rewards
+  assert "safe_planar_freeze" in cfg.rewards
+  assert "safe_planar_progress" in cfg.rewards
+  primary_human = cfg.scene.entities[PRIMARY_HUMAN_ENTITY_NAME].spec_fn().compile()
+  assert primary_human.nmocap == 1
+  assert all(contype == 0 for contype in primary_human.geom_contype)
+  assert all(
+    sensor.name != PRIMARY_HUMAN_CONTACT_SENSOR_NAME
+    for sensor in (cfg.scene.sensors or ())
+  )
+  assert "primary_human_collision" not in cfg.rewards
+  assert cfg.terminations["crowd_collision"].params["collision_margin"] == 0.1
+  assert cfg.terminations["primary_human_collision"].params == {
+    "robot_entity": "robot",
+    "human_entity": PRIMARY_HUMAN_ENTITY_NAME,
+    "robot_link_names": motion.link_filter.body_names,
+    "link_radius": motion.link_filter.link_radius_m,
+    "collision_margin": 0.1,
+  }
+
+
+def test_sparse_avoidance_prototype_uses_120_by_4_dual_scan() -> None:
+  cfg = unitree_g1_sparse_lidar_avoidance_tracking_env_cfg()
+  lidar = next(
+    sensor for sensor in cfg.scene.sensors if sensor.name == LIDAR_SENSOR_NAME
+  )
+  assert isinstance(lidar, HeldScanRayCastSensorCfg)
+  assert lidar.pattern.azimuth_samples == PROTOTYPE_LIDAR_AZIMUTH_SAMPLES == 120
+  assert lidar.pattern.elevation_angles_deg == PROTOTYPE_LIDAR_ELEVATIONS_DEG
+  assert lidar.pattern.num_rays == 480
+  assert lidar.pattern.rays_per_phase == 96
+  actor_lidar = cfg.observations["lidar"].terms["directional_scan_pair"]
+  assert actor_lidar.params["azimuth_bins"] == 24
+  assert actor_lidar.params["elevation_bins"] == 3
+  noise = actor_lidar.params["noise_cfg"]
+  assert noise.azimuth_samples == 120
+  assert noise.sector_width_samples == 30
+
+
+def test_range_rate_avoidance_adds_closing_speed_and_link_reward() -> None:
+  cfg = unitree_g1_lidar_range_rate_avoidance_tracking_env_cfg()
+  lidar_terms = cfg.observations["lidar"].terms
+
+  assert tuple(lidar_terms) == ("directional_range_rate", "scan_age")
+  range_rate = lidar_terms["directional_range_rate"]
+  assert range_rate.func.__name__ == "CachedDirectionalHeldLidarRangeRate"
+  assert range_rate.params["max_abs_range_rate_mps"] == 5.0
+  assert range_rate.clip == (-1.0, 1.0)
+  link_reward = cfg.rewards["link_proximity"]
+  assert link_reward.weight == -3.0
+  assert link_reward.params == {
+    "command_name": "motion",
+    "safe_clearance_m": 0.8,
+    "metric_name": "link_filter_minimum_clearance_m",
+  }
+
+
+def test_raw_actor_command_does_not_leak_filtered_joint_teacher() -> None:
+  raw_pos = torch.tensor([[1.0, 2.0]])
+  raw_vel = torch.tensor([[3.0, 4.0]])
+  filtered_pos = torch.tensor([[10.0, 20.0]])
+  filtered_vel = torch.tensor([[30.0, 40.0]])
+  command = SimpleNamespace(
+    cfg=SimpleNamespace(expose_filtered_command=False),
+    joint_pos=filtered_pos,
+    joint_vel=filtered_vel,
+    _raw_joint_pos=lambda: raw_pos,
+    _raw_joint_vel=lambda: raw_vel,
+  )
+
+  actor_command = PlanarFilteredReplayMotionCommand.command.fget(command)
+  assert actor_command is not None
+  torch.testing.assert_close(actor_command, torch.cat((raw_pos, raw_vel), dim=1))
+
+  command.cfg.expose_filtered_command = True
+  teacher_command = PlanarFilteredReplayMotionCommand.command.fget(command)
+  assert teacher_command is not None
+  torch.testing.assert_close(
+    teacher_command, torch.cat((filtered_pos, filtered_vel), dim=1)
+  )
 
 
 def test_kinematic_replay_demo_is_exact_and_defaults_to_dense_5_hz() -> None:
@@ -300,12 +505,13 @@ def test_reference_filter_demo_wraps_replay_without_learning_contract_changes() 
 
 
 def test_reference_filter_policy_demo_keeps_physics_and_checkpoint_contract() -> None:
-  nominal = unitree_g1_nominal_lidar_debug_env_cfg()
+  nominal = unitree_g1_nominal_lidar_debug_env_cfg(has_state_estimation=False)
   policy = unitree_g1_reference_filter_policy_lidar_demo_env_cfg()
 
   motion = policy.commands["motion"]
   assert isinstance(motion, PlanarFilteredReplayMotionCommandCfg)
   assert motion.write_reference_to_sim is False
+  assert motion.align_reference_to_robot_each_step is True
   assert motion.sampling_mode == "start"
   assert motion.pose_range == {}
   assert motion.velocity_range == {}
@@ -324,6 +530,10 @@ def test_reference_filter_policy_demo_keeps_physics_and_checkpoint_contract() ->
   assert "actuation" not in policy.sim.mujoco.disableflags
   assert policy.sim.nconmax == 70
   assert policy.sim.njmax == 500
+  assert "motion_anchor_pos_b" not in policy.observations["actor"].terms
+  assert "base_lin_vel" not in policy.observations["actor"].terms
+  assert "motion_anchor_pos_b" in policy.observations["critic"].terms
+  assert "base_lin_vel" in policy.observations["critic"].terms
 
   lidar = next(
     sensor for sensor in policy.scene.sensors if sensor.name == LIDAR_SENSOR_NAME
@@ -331,3 +541,31 @@ def test_reference_filter_policy_demo_keeps_physics_and_checkpoint_contract() ->
   assert isinstance(lidar, HeldScanRayCastSensorCfg)
   assert lidar.pattern.phases == 10
   assert lidar.scan_period == 0.2
+
+
+def test_live_reference_alignment_matches_robot_xy_and_yaw() -> None:
+  half_sqrt_two = math.sqrt(0.5)
+  reference_anchor_pos = torch.tensor([[1.0, 2.0, 0.8]])
+  reference_anchor_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+  robot_anchor_pos = torch.tensor([[10.0, 20.0, 1.1]])
+  robot_anchor_quat = torch.tensor([[half_sqrt_two, 0.0, 0.0, half_sqrt_two]])
+  body_positions = torch.tensor([[[1.0, 2.0, 0.8], [2.0, 2.0, 0.4], [1.0, 3.0, 1.2]]])
+
+  yaw_delta, aligned_anchor_xy = _planar_reference_alignment(
+    reference_anchor_quat,
+    robot_anchor_pos,
+    robot_anchor_quat,
+  )
+  aligned = _apply_planar_reference_alignment(
+    body_positions,
+    reference_anchor_pos,
+    aligned_anchor_xy,
+    yaw_delta,
+  )
+
+  torch.testing.assert_close(
+    aligned,
+    torch.tensor([[[10.0, 20.0, 0.8], [10.0, 21.0, 0.4], [9.0, 20.0, 1.2]]]),
+    atol=1e-6,
+    rtol=1e-6,
+  )

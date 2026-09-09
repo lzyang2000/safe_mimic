@@ -19,16 +19,13 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--bank",
     type=Path,
-    default=Path(
-      "artifacts/bones-seed/datasets/skeleton_path_bank_transition_v3"
-    ),
+    default=Path("artifacts/bones-seed/datasets/skeleton_path_bank_transition_v3"),
   )
   parser.add_argument(
     "--transition-index",
     type=Path,
     default=Path(
-      "artifacts/bones-seed/datasets/"
-      "capsule_path_bank_50hz_6s/transition_index_v3"
+      "artifacts/bones-seed/datasets/capsule_path_bank_50hz_6s/transition_index_v3"
     ),
   )
   parser.add_argument("--num-envs", type=int, default=4096)

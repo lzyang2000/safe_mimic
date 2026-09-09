@@ -34,7 +34,9 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--temporal-labels",
     type=Path,
-    default=Path("artifacts/bones-seed/metadata/seed_metadata_v002_temporal_labels.jsonl"),
+    default=Path(
+      "artifacts/bones-seed/metadata/seed_metadata_v002_temporal_labels.jsonl"
+    ),
   )
   parser.add_argument(
     "--output",
@@ -59,9 +61,7 @@ def parse_args() -> argparse.Namespace:
 def _load_records(path: Path, families: set[str]) -> list[dict[str, object]]:
   with path.open() as source:
     return [
-      record
-      for line in source
-      if (record := json.loads(line))["family"] in families
+      record for line in source if (record := json.loads(line))["family"] in families
     ]
 
 

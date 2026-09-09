@@ -64,6 +64,9 @@ class HumanCapsuleCrowdMotion(ManagerTermBase):
       None if target_arc_spacing is None else float(target_arc_spacing)
     )
     self.randomize_density = bool(params.get("randomize_density", False))
+    self.obstacle_free_probability = float(
+      params.get("obstacle_free_probability", 0.0)
+    )
     self.radial_jitter_m = float(params.get("radial_jitter_m", 0.0))
     self.min_shape_exponent = float(params.get("min_shape_exponent", 2.0))
     self.max_shape_exponent = float(params.get("max_shape_exponent", 2.0))
@@ -89,6 +92,8 @@ class HumanCapsuleCrowdMotion(ManagerTermBase):
       raise ValueError("event capacity must match the compiled crowd asset")
     if not 0 <= self.min_count <= self.max_count <= self.capacity:
       raise ValueError("invalid crowd density range")
+    if not 0.0 <= self.obstacle_free_probability <= 1.0:
+      raise ValueError("obstacle-free probability must be in [0, 1]")
     if not 0.0 < self.min_playback_speed <= self.max_playback_speed:
       raise ValueError("invalid crowd playback-speed range")
     if not 0.0 < self.min_human_height_m <= self.max_human_height_m:
@@ -174,6 +179,13 @@ class HumanCapsuleCrowdMotion(ManagerTermBase):
       raise ValueError("runtime crowd must have one geom per capsule")
 
     self._enabled = torch.zeros(self.agent_count, dtype=torch.bool, device=self.device)
+    shared_mask = getattr(env, "_safe_mimic_obstacle_free_envs", None)
+    if shared_mask is None:
+      shared_mask = torch.zeros(
+        self.num_envs, dtype=torch.bool, device=self.device
+      )
+      env._safe_mimic_obstacle_free_envs = shared_mask
+    self._obstacle_free_envs: torch.Tensor = shared_mask
     self._slot_positions_w = torch.zeros((self.agent_count, 3), device=self.device)
     self._slot_facing_yaw = torch.zeros(self.agent_count, device=self.device)
     self._last_path_ids = torch.zeros(
@@ -254,6 +266,7 @@ class HumanCapsuleCrowdMotion(ManagerTermBase):
     )
     poses.active[agent_ids] = False
     self.sampler.dirty[agent_ids] = False
+    self.sampler.scheduled[agent_ids] = False
     self.sampler.next_update_times_s[agent_ids] = torch.inf
 
   def _schedule_resets(self, env_ids: torch.Tensor, now: float) -> torch.Tensor:
@@ -275,8 +288,13 @@ class HumanCapsuleCrowdMotion(ManagerTermBase):
       inward_facing_probability=self.inward_facing_probability,
       inward_facing_jitter_rad=self.inward_facing_jitter_rad,
     )
+    self._obstacle_free_envs[env_ids] = (
+      torch.rand(count, device=self.device) < self.obstacle_free_probability
+    )
     all_agent_ids = self._agent_ids_for_envs(env_ids)
-    enabled = placement.active.reshape(-1)
+    enabled = (
+      placement.active & ~self._obstacle_free_envs[env_ids, None]
+    ).reshape(-1)
     self._enabled[all_agent_ids] = enabled
 
     robot_positions = self._robot_root_positions_from_qpos(env_ids)

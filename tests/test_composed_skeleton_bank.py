@@ -248,3 +248,27 @@ def test_stationary_sequence_continuation_preserves_boundary_pose(
   after = sampler.sample_held(end_time)
 
   assert torch.allclose(centers_before, after.centers_w, atol=2e-5)
+
+
+def test_expiry_ignores_unscheduled_and_deactivated_envs(tmp_path: Path) -> None:
+  path = tmp_path / "skeleton_bank"
+  _write_tiny_skeleton_bank(path)
+  sampler = OnlineComposedHumanSampler(SkeletonPathBank(path), 2, "cpu")
+  # Never-scheduled environments must not expire at any time.
+  assert sampler.expired_env_ids(1.0e6).numel() == 0
+
+  sampler.schedule_intersections(
+    torch.tensor([0]),
+    sequence_source_ids=torch.tensor([[10, 20, 30]]),
+    global_intersection_times_s=torch.tensor([2.0]),
+    robot_positions_at_intersection_w=torch.tensor([[4.0, 3.0, 0.0]]),
+    robot_yaw_at_intersection=torch.zeros(1),
+    robot_path_heading_at_intersection=torch.zeros(1),
+    ground_height_m=torch.zeros(1),
+  )
+  far_future = 1.0e6
+  assert sampler.expired_env_ids(far_future).tolist() == [0]
+  # Deactivation (a parked human) silences the stale schedule's expiry so the
+  # driving event never revives it mid-episode.
+  sampler.scheduled[torch.tensor([0])] = False
+  assert sampler.expired_env_ids(far_future).numel() == 0

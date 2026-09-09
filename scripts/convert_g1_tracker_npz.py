@@ -25,9 +25,7 @@ _DATA: mujoco.MjData | None = None
 
 def _parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument(
-    "--dataset-root", type=Path, default=Path("artifacts/bones-seed")
-  )
+  parser.add_argument("--dataset-root", type=Path, default=Path("artifacts/bones-seed"))
   parser.add_argument("--manifest", type=Path)
   parser.add_argument("--output-dir", type=Path)
   parser.add_argument("--workers", type=int, default=min(16, os.cpu_count() or 1))
@@ -134,8 +132,7 @@ def main() -> None:
     }
     for record in records
     if not any(
-      error["output"] == output_by_move[str(record["move_name"])]
-      for error in errors
+      error["output"] == output_by_move[str(record["move_name"])] for error in errors
     )
   ]
   with (output_dir.parent / "npz_manifest_50hz.yaml").open(

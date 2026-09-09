@@ -41,13 +41,25 @@ from safe_mimic.sensing.held_scan import (
   HeldScanRayCastSensorCfg,
   InterleavedSphericalLidarPatternCfg,
 )
-from safe_mimic.sensing.observations import LidarNoiseCfg, normalized_lidar_ranges
+from safe_mimic.sensing.observations import (
+  BlindDirectionalHeldLidarRangeRate,
+  CachedDirectionalHeldLidarRangeRate,
+  CachedDirectionalHeldLidarScanPair,
+  CachedDirectionalLidarRanges,
+  LidarNoiseCfg,
+  held_lidar_scan_age,
+  normalized_lidar_ranges,
+)
 from safe_mimic.tasks import mdp
 from safe_mimic.tasks.human_capsule_event import HumanCapsuleMotion
 from safe_mimic.tasks.human_crowd_event import HumanCapsuleCrowdMotion
 from safe_mimic.tasks.kinematic_replay_command import (
   KinematicReplayMotionCommandCfg,
   PlanarFilteredReplayMotionCommandCfg,
+)
+from safe_mimic.tasks.packed_human_event import (
+  PackedHumanCapsuleCrowdMotion,
+  PackedHumanCapsuleMotion,
 )
 from safe_mimic.tasks.packed_motion_command import PackedMotionCommandCfg
 
@@ -68,12 +80,52 @@ LIVOX_SNAPSHOT_ELEVATIONS_DEG = tuple(
   -52.0 * index / (LIVOX_SNAPSHOT_ELEVATION_SAMPLES - 1)
   for index in range(LIVOX_SNAPSHOT_ELEVATION_SAMPLES)
 )
+PROTOTYPE_LIDAR_AZIMUTH_SAMPLES = 120
+PROTOTYPE_LIDAR_ELEVATIONS_DEG = (0.0, -10.0, -25.0, -45.0)
 LIDAR_MIN_DISTANCE_M = 0.3
 LIDAR_MAX_DISTANCE_M = 5.0
 LIDAR_SCAN_PERIOD_S = 0.1
 LIDAR_SCAN_PHASES = 5
 CROWD_CAPSULES_PER_PERSON = len(SOMA_CROWD_PROXY_SPECS)
 CROWD_PRIVILEGED_NEAREST_PEOPLE = 8
+
+# Slow-regime encounter distribution (user direction 2026-09-04): the walking
+# human spawns outside the critical distance and approaches no faster than the
+# robot's sustained planar speed. joint@16k slow-bin anatomy: every collision
+# that started outside the 0.8 m safe clearance had a root distance >= 1.4 m
+# and the human's swinging limbs reach ~0.5 m from its root. Spawn audit on the
+# packed training events (1024 envs x 4 resets): 1.6 m leaves 97.2 % of spawns
+# outside the 0.8 m clearance, 1.8 m leaves 99.7 % (min 0.54, p1 0.88 m) while
+# 98.3 % of effective approach speeds stay <= 0.75 m/s (p99 0.76); 2.0 m gives
+# 100 % clearance but the radius clamp pushes 7 % of speeds past 0.75. Speed bins stop
+# at 0.75 m/s (robot cap median 0.60, sustained plateau ~0.6). TTC bins and the
+# delay range let a 4 m spawn at 0.5 m/s still arrive inside the 10 s episode.
+SLOW_REGIME_MIN_SPAWN_RADIUS_M = 1.8
+SLOW_REGIME_SPEED_EDGES_MPS = (0.25, 0.5, 0.75)
+SLOW_REGIME_MAX_SPEED_MPS = SLOW_REGIME_SPEED_EDGES_MPS[-1]
+SLOW_REGIME_TTC_EDGES_S = (2.5, 4.0, 6.0, 8.0)
+SLOW_REGIME_DELAY_RANGE_S = (SLOW_REGIME_TTC_EDGES_S[0], SLOW_REGIME_TTC_EDGES_S[-1])
+# Dense variant (2026-09-04, after the slow@15k gate showed 0.7 training
+# collisions per batch): a 5 s TTC cap fits two to three encounters into the
+# 10 s episode instead of one. Radius clamp 1.8-4.0 keeps effective speeds
+# under 0.75 m/s (0.25 m/s at 2.5 s -> 0.625 m clamped to 1.8 -> 0.72 m/s).
+# The crowd's obstacle-free probability is deliberately NOT changed.
+SLOW_REGIME_DENSE_TTC_EDGES_S = (2.5, 3.5, 5.0)
+SLOW_REGIME_DENSE_DELAY_RANGE_S = (
+  SLOW_REGIME_DENSE_TTC_EDGES_S[0],
+  SLOW_REGIME_DENSE_TTC_EDGES_S[-1],
+)
+# ee_body_pos bound while the link filter is actively correcting that limb.
+# NOTE (slow@15k gate): gating this termination on the corrected limb removed
+# the main training pressure for arm compliance (state t 0.856 -> 0.618); the
+# flag stays available but the registered tasks after Leash-Slow keep the
+# strict stock termination.
+EE_LOOSENED_THRESHOLD_M = 0.5
+# Lag-aware ee_body_pos (2026-09-06): bound = 0.25 m + LAG_TIME * |reference
+# vertical speed|, capped. 0.2 s is roughly the actor's observed arm latency;
+# the cap keeps a runaway target from disabling the check.
+EE_LAG_TIME_S = 0.2
+EE_LAG_MAX_THRESHOLD_M = 0.6
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CAPSULE_BANK_PATH = (
   _PROJECT_ROOT / "artifacts/bones-seed/datasets/capsule_path_bank_50hz_6s"
@@ -93,13 +145,24 @@ DEFAULT_STANDING_SKELETON_BANK_PATH = (
   _PROJECT_ROOT
   / "artifacts/bones-seed/datasets/skeleton_path_bank_standing_arm_actions_100"
 )
+DEFAULT_PACKED_PRIMARY_HUMAN_BANK_PATH = (
+  _PROJECT_ROOT / "artifacts/bones-seed/datasets/packed_primary_human_trajectory_v1"
+)
+DEFAULT_PACKED_CROWD_HUMAN_BANK_PATH = (
+  _PROJECT_ROOT / "artifacts/bones-seed/datasets/packed_crowd_human_trajectory_v1"
+)
 DEFAULT_G1_MOTION_LIBRARY_MANIFEST = (
-  _PROJECT_ROOT
-  / "artifacts/bones-seed/datasets/g1_wbc70_dance30_paired_10g_v1/"
+  _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_wbc70_dance30_paired_10g_v1/"
   "conversion_manifest.jsonl"
 )
-DEFAULT_EXAMPLE_DANCE_MOTION_FILE = Path(
-  "/tmp/mjlab_cache/lafan1_dance1_subject1_demo_motion.npz"
+# G1-retargeted ballet library (348 clips, 1.4-17 s, median 6 s). Used whole
+# (every split) as the reference for the Leash-Slow-Dense-Ballet task; clips
+# shorter than the episode chain into a fresh clip when they end.
+DEFAULT_G1_BALLET_MANIFEST = (
+  _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_ballet_v1/ballet.yaml"
+)
+DEFAULT_EXAMPLE_DANCE_MOTION_FILE = (
+  _PROJECT_ROOT / "artifacts/motions/lafan1_dance1_subject1_demo_motion.npz"
 )
 IMPLICIT_STATE_HISTORY_STEPS = 10
 
@@ -272,6 +335,8 @@ def _primary_human_motion_event_cfg(*, show_mesh: bool) -> EventTermCfg:
       "min_human_height_m": 1.3,
       "max_human_height_m": 1.9,
       "show_mesh": show_mesh,
+      "print_velocity": show_mesh,
+      "velocity_print_interval_s": 0.5,
       "mesh_skin_path": DEFAULT_SOMA_MESH_SKIN_PATH,
     },
   )
@@ -360,10 +425,9 @@ def unitree_g1_obstacle_aware_tracking_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
   """Build flat-ground G1 imitation where global motion may avoid obstacles.
 
-  Relative body-pose rewards retain the reference motion's style while weakened
-  global-anchor rewards let the root translate and yaw around an obstacle. This
-  is a new actor input contract: an unmodified upstream checkpoint cannot consume
-  the LiDAR term directly.
+  The upstream tracking rewards and their weights are retained. Human proximity
+  and contact terms add obstacle awareness. This is a new actor input contract:
+  an unmodified upstream checkpoint cannot consume the LiDAR term directly.
   """
   cfg = unitree_g1_flat_tracking_env_cfg(play=play)
   cfg.scene.entities["robot"].spec_fn = get_g1_with_mid360_spec
@@ -423,10 +487,6 @@ def unitree_g1_obstacle_aware_tracking_env_cfg(
 
   cfg.events[HUMAN_MOTION_EVENT_NAME] = _human_motion_event_cfg(show_mesh=play)
 
-  # Preserve pose and rhythm strongly. Global root matching is deliberately soft:
-  # it pulls the robot back toward the reference path only when clearance permits.
-  cfg.rewards["motion_global_root_pos"].weight = 0.15
-  cfg.rewards["motion_global_root_ori"].weight = 0.15
   cfg.rewards["human_proximity"] = RewardTermCfg(
     func=mdp.human_capsule_proximity_penalty,
     weight=-3.0,
@@ -525,8 +585,529 @@ def unitree_g1_crowd_and_human_tracking_env_cfg(
   return cfg
 
 
+def unitree_g1_lidar_avoidance_tracking_env_cfg(
+  play: bool = False,
+  *,
+  lidar_azimuth_samples: int = LIVOX_SNAPSHOT_AZIMUTH_SAMPLES,
+  lidar_elevation_angles_deg: tuple[float, ...] = LIVOX_SNAPSHOT_ELEVATIONS_DEG,
+  actor_azimuth_bins: int = 120,
+  actor_elevation_bins: int = 9,
+) -> ManagerBasedRlEnvCfg:
+  """Build the from-scratch no-state LiDAR avoidance training task.
+
+  The actor receives the nominal live-aligned mimic command plus current and
+  previous 10 Hz quarter-resolution scans. A privileged CBF produces safe
+  planar and joint targets only for the critic and rewards; it is deliberately
+  hidden from the actor so avoidance must be inferred from LiDAR. Both human
+  populations are ray-only; analytical capsule clearance terminates an episode
+  before contact, without adding human contacts to MuJoCo's constraint solve.
+  """
+  cfg = unitree_g1_crowd_and_human_tracking_env_cfg(play=play)
+
+  cfg.scene.entities[PRIMARY_HUMAN_ENTITY_NAME] = EntityCfg(
+    spec_fn=partial(get_soma_capsule_human_spec, collidable=False)
+  )
+  cfg.scene.sensors = tuple(
+    sensor
+    for sensor in (cfg.scene.sensors or ())
+    if sensor.name != PRIMARY_HUMAN_CONTACT_SENSOR_NAME
+  )
+  cfg.rewards.pop("primary_human_collision")
+
+  actor_terms = cfg.observations["actor"].terms
+  actor_terms.pop("motion_anchor_pos_b")
+  actor_terms.pop("base_lin_vel")
+  actor_terms.pop(LIDAR_SENSOR_NAME)
+
+  motion_cfg = cfg.commands["motion"]
+  assert isinstance(motion_cfg, tracking_mdp.MotionCommandCfg)
+  filtered_command_cfg = PlanarFilteredReplayMotionCommandCfg(
+    **{field.name: getattr(motion_cfg, field.name) for field in fields(motion_cfg)},
+    obstacle_entity_names=(HUMAN_ENTITY_NAME, PRIMARY_HUMAN_ENTITY_NAME),
+    link_filter_capsules_per_group=(CROWD_CAPSULES_PER_PERSON, None),
+    link_filter_nearest_groups=(CROWD_PRIVILEGED_NEAREST_PEOPLE, None),
+    write_reference_to_sim=False,
+    align_reference_to_robot_each_step=True,
+    expose_filtered_command=False,
+  )
+  filtered_command_cfg.motion_file = str(DEFAULT_EXAMPLE_DANCE_MOTION_FILE)
+  filtered_command_cfg.planar_filter.safe_clearance_m = 0.8
+  filtered_command_cfg.link_filter.safe_clearance_m = 0.8
+  filtered_command_cfg.planar_filter.max_intervention_speed_mps = 2.0
+  filtered_command_cfg.planar_filter.max_planar_speed_mps = 2.3
+  # Random start frames: episodes cover the whole clip instead of replaying
+  # its first ``episode_length_s`` seconds from frame zero every reset.
+  # Play mode pins "start" to match upstream mjlab's play convention.
+  filtered_command_cfg.sampling_mode = "start" if play else "uniform"
+  cfg.commands["motion"] = filtered_command_cfg
+
+  lidar = _mid360_lidar_cfg(
+    debug_vis=play,
+    scan_period=LIDAR_SCAN_PERIOD_S,
+    scan_phases=LIDAR_SCAN_PHASES,
+  )
+  lidar.pattern = InterleavedSphericalLidarPatternCfg(
+    azimuth_samples=lidar_azimuth_samples,
+    elevation_angles_deg=lidar_elevation_angles_deg,
+    phases=LIDAR_SCAN_PHASES,
+    origin_offset=(0.0, 0.0, 0.0),
+  )
+  cfg.scene.sensors = tuple(
+    lidar if sensor.name == LIDAR_SENSOR_NAME else sensor
+    for sensor in (cfg.scene.sensors or ())
+  )
+
+  cfg.observations["lidar"] = ObservationGroupCfg(
+    terms={
+      "directional_scan_pair": ObservationTermCfg(
+        func=CachedDirectionalHeldLidarScanPair,
+        params={
+          "sensor_name": LIDAR_SENSOR_NAME,
+          "azimuth_samples": lidar_azimuth_samples,
+          "elevation_samples": len(lidar_elevation_angles_deg),
+          "azimuth_bins": actor_azimuth_bins,
+          "elevation_bins": actor_elevation_bins,
+          "noise_cfg": None
+          if play
+          else LidarNoiseCfg(
+            azimuth_samples=lidar_azimuth_samples,
+            sector_width_samples=lidar_azimuth_samples // 4,
+          ),
+        },
+        clip=(0.0, 1.0),
+      ),
+      "scan_age": ObservationTermCfg(
+        func=held_lidar_scan_age,
+        params={"sensor_name": LIDAR_SENSOR_NAME},
+        clip=(0.0, 1.0),
+      ),
+    },
+    concatenate_terms=True,
+    enable_corruption=not play,
+  )
+
+  critic_terms = cfg.observations["critic"].terms
+  critic_terms[LIDAR_SENSOR_NAME] = ObservationTermCfg(
+    func=CachedDirectionalLidarRanges,
+    params={
+      "sensor_name": LIDAR_SENSOR_NAME,
+      "azimuth_samples": lidar_azimuth_samples,
+      "elevation_samples": len(lidar_elevation_angles_deg),
+      "azimuth_bins": 24,
+      "elevation_bins": 3,
+    },
+    clip=(0.0, 1.0),
+  )
+  critic_terms["filtered_planar_velocity_b"] = ObservationTermCfg(
+    func=mdp.filtered_planar_velocity_b,
+    params={"command_name": "motion"},
+  )
+  critic_terms["filtered_joint_command"] = ObservationTermCfg(
+    func=mdp.filtered_joint_command,
+    params={"command_name": "motion"},
+  )
+  critic_terms["crowd_capsule_vectors_b"] = ObservationTermCfg(
+    func=mdp.human_capsule_vectors_b,
+    params={
+      "robot_entity": "robot",
+      "human_entity": HUMAN_ENTITY_NAME,
+      "max_distance": LIDAR_MAX_DISTANCE_M,
+      "capsules_per_group": CROWD_CAPSULES_PER_PERSON,
+      "nearest_groups": CROWD_PRIVILEGED_NEAREST_PEOPLE,
+    },
+    clip=(-1.0, 1.0),
+  )
+
+  crowd_event = cfg.events[HUMAN_MOTION_EVENT_NAME]
+  crowd_event.params["obstacle_free_probability"] = 0.25
+  primary_event = cfg.events[PRIMARY_HUMAN_EVENT_NAME]
+  primary_event.params["update_hz"] = 10.0
+  primary_event.params["use_shared_obstacle_free_mask"] = True
+  # Sample encounters jointly by (TTC, approach speed) with curriculum-ramped,
+  # failure-adaptive bins. The radius/delay bounds double as the sampler's
+  # spawn clamp and as the independent-mode fallback used by evaluation.
+  primary_event.params["min_initial_spawn_radius_m"] = 0.75
+  primary_event.params["min_intersection_delay_s"] = 0.5
+  primary_event.params["max_intersection_delay_s"] = 4.0
+  primary_event.params["encounter_sampling"] = "ttc"
+  if not play:
+    cfg.events[HUMAN_MOTION_EVENT_NAME] = EventTermCfg(
+      func=PackedHumanCapsuleCrowdMotion,
+      mode="step",
+      params={
+        **crowd_event.params,
+        "packed_bank_path": DEFAULT_PACKED_CROWD_HUMAN_BANK_PATH,
+      },
+    )
+    cfg.events[PRIMARY_HUMAN_EVENT_NAME] = EventTermCfg(
+      func=PackedHumanCapsuleMotion,
+      mode="step",
+      params={
+        **primary_event.params,
+        "packed_bank_path": DEFAULT_PACKED_PRIMARY_HUMAN_BANK_PATH,
+      },
+    )
+
+  cfg.rewards["human_proximity"].params["safe_clearance"] = 0.8
+  cfg.rewards["primary_human_proximity"].params["safe_clearance"] = 0.8
+  cfg.rewards["safe_planar_velocity"] = RewardTermCfg(
+    func=mdp.safe_planar_velocity_tracking_exp,
+    weight=1.5,
+    params={"command_name": "motion", "std": 0.5},
+  )
+  cfg.rewards["filtered_joint_position"] = RewardTermCfg(
+    func=mdp.filtered_joint_position_tracking_exp,
+    weight=1.0,
+    params={"command_name": "motion", "std": 0.35},
+  )
+  cfg.rewards["safe_planar_freeze"] = RewardTermCfg(
+    func=mdp.safe_planar_freeze_penalty,
+    weight=-1.0,
+    params={
+      "command_name": "motion",
+      "minimum_target_speed": 0.1,
+      "minimum_progress_fraction": 0.25,
+    },
+  )
+  cfg.rewards["safe_planar_progress"] = RewardTermCfg(
+    func=mdp.safe_planar_progress_reward,
+    weight=1.0,
+    params={
+      "command_name": "motion",
+      "minimum_target_speed": 0.1,
+      "normalization_speed": 0.5,
+    },
+  )
+  cfg.rewards["survival"] = RewardTermCfg(
+    func=mdp.survival_reward,
+    weight=0.1,
+  )
+  cfg.terminations["crowd_collision"] = TerminationTermCfg(
+    func=mdp.HumanCapsuleLinkCollision,
+    params={
+      "robot_entity": "robot",
+      "human_entity": HUMAN_ENTITY_NAME,
+      "robot_link_names": filtered_command_cfg.link_filter.body_names,
+      "link_radius": filtered_command_cfg.link_filter.link_radius_m,
+      "collision_margin": 0.1,
+      "capsules_per_group": CROWD_CAPSULES_PER_PERSON,
+      "nearest_groups": CROWD_PRIVILEGED_NEAREST_PEOPLE,
+    },
+  )
+  cfg.terminations["primary_human_collision"] = TerminationTermCfg(
+    func=mdp.HumanCapsuleLinkCollision,
+    params={
+      "robot_entity": "robot",
+      "human_entity": PRIMARY_HUMAN_ENTITY_NAME,
+      "robot_link_names": filtered_command_cfg.link_filter.body_names,
+      "link_radius": filtered_command_cfg.link_filter.link_radius_m,
+      "collision_margin": 0.1,
+    },
+  )
+  return cfg
+
+
+def unitree_g1_sparse_lidar_avoidance_tracking_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Build the directional 120 x 4 LiDAR prototype task."""
+
+  return unitree_g1_lidar_avoidance_tracking_env_cfg(
+    play=play,
+    lidar_azimuth_samples=PROTOTYPE_LIDAR_AZIMUTH_SAMPLES,
+    lidar_elevation_angles_deg=PROTOTYPE_LIDAR_ELEVATIONS_DEG,
+    actor_azimuth_bins=24,
+    actor_elevation_bins=3,
+  )
+
+
+def unitree_g1_lidar_range_rate_avoidance_tracking_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Add explicit 10 Hz closing speed and dense link-clearance supervision."""
+
+  cfg = unitree_g1_lidar_avoidance_tracking_env_cfg(play=play)
+  lidar_terms = cfg.observations["lidar"].terms
+  scan_pair = lidar_terms.pop("directional_scan_pair")
+  lidar_terms = {
+    "directional_range_rate": ObservationTermCfg(
+      func=CachedDirectionalHeldLidarRangeRate,
+      params={
+        **scan_pair.params,
+        "max_abs_range_rate_mps": 5.0,
+      },
+      clip=(-1.0, 1.0),
+    ),
+    **lidar_terms,
+  }
+  cfg.observations["lidar"].terms = lidar_terms
+
+  motion = cfg.commands["motion"]
+  assert isinstance(motion, PlanarFilteredReplayMotionCommandCfg)
+  cfg.rewards["link_proximity"] = RewardTermCfg(
+    func=mdp.reference_filter_clearance_penalty,
+    weight=-3.0,
+    params={
+      "command_name": "motion",
+      "safe_clearance_m": motion.link_filter.safe_clearance_m,
+      "metric_name": "link_filter_minimum_clearance_m",
+    },
+  )
+  return cfg
+
+
+def unitree_g1_lidar_auxiliary_avoidance_tracking_env_cfg(
+  play: bool = False,
+  *,
+  expose_filtered_command: bool = False,
+  propagate_arm_corrections_to_body_targets: bool = False,
+  active_correction_reward: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Add training-only planar and limb-filter targets for the actor loss.
+
+  ``expose_filtered_command`` swaps the actor's observed joint-command
+  channel from the raw reference to the filter-adjusted joint targets
+  (``PlanarFilteredReplayMotionCommandCfg.expose_filtered_command``). It
+  defaults to ``False`` so every existing task built on this function is
+  unaffected.
+
+  ``propagate_arm_corrections_to_body_targets`` forwards the filtered arm
+  joint corrections into the command's body position/orientation targets via
+  reference-frame FK
+  (``PlanarFilteredReplayMotionCommandCfg.propagate_arm_corrections_to_body_targets``).
+  It defaults to ``False`` so every existing task built on this function is
+  unaffected.
+
+  ``active_correction_reward`` adds ``"active_correction_joint_tracking"``
+  (``mdp.active_correction_joint_tracking_exp``), which rewards joint
+  tracking only where the CBF teacher's own residual is active, instead of
+  diluting the signal over all 29 joints like ``"filtered_joint_position"``
+  does. It defaults to ``False`` so every existing task built on this
+  function is unaffected.
+  """
+
+  cfg = unitree_g1_lidar_range_rate_avoidance_tracking_env_cfg(play=play)
+  if expose_filtered_command:
+    cfg.commands["motion"].expose_filtered_command = True
+  if propagate_arm_corrections_to_body_targets:
+    cfg.commands["motion"].propagate_arm_corrections_to_body_targets = True
+  if active_correction_reward:
+    cfg.rewards["active_correction_joint_tracking"] = RewardTermCfg(
+      func=mdp.active_correction_joint_tracking_exp,
+      weight=1.5,
+      params={
+        "command_name": "motion",
+        "std": 0.2,
+        "activation_threshold_rad": 0.05,
+      },
+    )
+  cfg.observations["avoidance_teacher"] = ObservationGroupCfg(
+    terms={
+      "corrections": ObservationTermCfg(
+        func=mdp.avoidance_teacher_corrections,
+        params={"command_name": "motion"},
+      )
+    },
+    concatenate_terms=True,
+    enable_corruption=False,
+  )
+  cfg.observations["avoidance_robustness"] = ObservationGroupCfg(
+    terms={
+      "conditioning_noise": ObservationTermCfg(
+        func=mdp.avoidance_conditioning_noise,
+        params={"size": 31},
+      )
+    },
+    concatenate_terms=True,
+    enable_corruption=False,
+  )
+  cfg.rewards["urgent_escape_progress"] = RewardTermCfg(
+    func=mdp.urgent_escape_progress_reward,
+    weight=1.0,
+    params={
+      "command_name": "motion",
+      "human_entity": PRIMARY_HUMAN_ENTITY_NAME,
+    },
+  )
+  return cfg
+
+
+_NOMINAL_TRACKING_REWARD_NAMES = (
+  "motion_global_root_pos",
+  "motion_global_root_ori",
+  "motion_body_pos",
+  "motion_body_ori",
+  "motion_body_lin_vel",
+  "motion_body_ang_vel",
+  "action_rate_l2",
+  "joint_limit",
+  "self_collisions",
+)
+
+
+def unitree_g1_lidar_unified_reference_tracking_env_cfg(
+  play: bool = False,
+  *,
+  active_joint_reward: bool = False,
+  root_lead_m: float | None = None,
+  planar_filter_at_robot_root: bool = False,
+  slow_regime: bool = False,
+  dense_encounters: bool = False,
+  filter_gated_ee_termination: bool = False,
+  lag_aware_ee_termination: bool = False,
+  motion_manifest: str | None = None,
+  blind_actor: bool = False,
+  nominal_reference: bool = False,
+  training_humans: bool = True,
+) -> ManagerBasedRlEnvCfg:
+  """Nominal tracking rewards on one fully filtered reference.
+
+  Pipeline: LiDAR of randomized humans -> privileged planar + link CBF filters
+  -> FK of every joint correction (anchor included) and closed-loop
+  integration of the filtered root -> the stock mjlab tracking reward set on
+  that reference. Every bespoke avoidance reward (planar velocity / progress /
+  freeze, filtered-joint, urgent-escape, survival, proximity penalties) is
+  removed; the two human collision terminations stay because the humans are
+  ray-only geometry with no physics contact. The auxiliary teacher observation
+  groups stay: they supervise the co-adjust head, they are not rewards.
+
+  ``active_joint_reward`` adds ONE joint-space tracking term,
+  ``"motion_active_joint_pos"`` (``mdp.active_correction_joint_tracking_exp``,
+  weight 1.0, std 0.4 rad per active joint), evaluated against the filtered
+  joint targets on the joints the filter is actively correcting. The nominal
+  set has no joint-space term and its body-position term averages over 14
+  bodies, so an arm correction otherwise carries almost no gradient (unified
+  10k gate: arm state compliance 0.32 and falling). Std sized from data: the
+  per-active-joint rms error at that gate was ~0.33 rad, so std 0.4 yields
+  ~0.5 reward today and 1.0 at compliance (FKC2's std 0.2 was inert, ~0.06).
+
+  ``root_lead_m`` / ``planar_filter_at_robot_root`` change only the reference
+  generator (joint@14k root-tracking diagnosis, 2026-09-03): the closed-loop
+  target is leashed to that planar lead from the robot so the nominal
+  root-position term never saturates, and the planar CBF is evaluated at the
+  robot instead of at the target so the escape velocity persists while the
+  robot itself is still inside the safe clearance. Rewards, observations and
+  terminations are untouched.
+
+  ``slow_regime`` re-parameterises ONLY the walking human's encounter
+  sampler (see the ``SLOW_REGIME_*`` constants): spawn outside the critical
+  distance, TTC x speed bins capped at ``SLOW_REGIME_MAX_SPEED_MPS``, no hard
+  bins, matching delay range. The crowd is untouched (its annulus already
+  starts at 2 m). ``filter_gated_ee_termination`` swaps ``ee_body_pos`` for
+  :func:`mdp.bad_motion_body_pos_z_only_filter_gated` with the stock bodies
+  and 0.25 m bound, loosened to ``EE_LOOSENED_THRESHOLD_M`` on a limb while
+  the link filter is correcting it. ``dense_encounters`` (requires
+  ``slow_regime``) swaps in the ``SLOW_REGIME_DENSE_*`` TTC edges and delay
+  range so each episode holds two to three encounters. ``motion_manifest``
+  replaces the single dance clip with a clip-library manifest (every split);
+  the replay command chains to a fresh clip whenever one ends.
+  ``blind_actor`` feeds the actor a constant "no returns" LiDAR term.
+  ``nominal_reference`` turns BOTH CBF filters off (the reference is the raw
+  live-aligned motion, teacher correction zero) so a blind baseline trained
+  with it has no avoidance signal of any kind. ``training_humans=False``
+  (training cfg only, ignored when ``play``) additionally removes the two
+  human animation events and the two collision terminations, so the humans
+  stay parked below the floor and never touch training; the play cfg keeps
+  them so evaluation happens in the populated scene. Scene entities and the
+  critic's privileged terms are untouched so network shapes match.
+  """
+  if dense_encounters and not slow_regime:
+    raise ValueError("dense_encounters requires slow_regime=True")
+  if filter_gated_ee_termination and lag_aware_ee_termination:
+    raise ValueError("choose one ee_body_pos variant, not both")
+  cfg = unitree_g1_lidar_auxiliary_avoidance_tracking_env_cfg(play=play)
+  motion = cfg.commands["motion"]
+  assert isinstance(motion, PlanarFilteredReplayMotionCommandCfg)
+  motion.propagate_joint_corrections_to_body_targets = True
+  motion.closed_loop_root_target = True
+  motion.max_root_lead_m = root_lead_m
+  motion.planar_filter_at_robot_root = planar_filter_at_robot_root
+  motion.disable_filters = nominal_reference
+  if not training_humans and not play:
+    for name in (HUMAN_MOTION_EVENT_NAME, PRIMARY_HUMAN_EVENT_NAME):
+      cfg.events.pop(name)
+    for name in ("crowd_collision", "primary_human_collision"):
+      cfg.terminations.pop(name)
+  if motion_manifest is not None:
+    motion.motion_file = str(motion_manifest)
+    motion.manifest_splits = None
+  if blind_actor:
+    # No-perception baseline: the actor's LiDAR term reads "no returns" at
+    # every step (same shape/params, so the network is identical); the critic
+    # keeps its privileged LiDAR and human vectors.
+    cfg.observations["lidar"].terms["directional_range_rate"].func = (
+      BlindDirectionalHeldLidarRangeRate
+    )
+  if lag_aware_ee_termination:
+    stock = cfg.terminations["ee_body_pos"]
+    cfg.terminations["ee_body_pos"] = TerminationTermCfg(
+      func=mdp.bad_motion_body_pos_z_only_lag_aware,
+      params={
+        "command_name": "motion",
+        "threshold": stock.params["threshold"],
+        "lag_time_s": EE_LAG_TIME_S,
+        "max_threshold": EE_LAG_MAX_THRESHOLD_M,
+        "body_names": tuple(stock.params["body_names"]),
+      },
+    )
+  if slow_regime:
+    primary = cfg.events[PRIMARY_HUMAN_EVENT_NAME].params
+    primary["min_initial_spawn_radius_m"] = SLOW_REGIME_MIN_SPAWN_RADIUS_M
+    primary["encounter_sampling"] = "ttc"
+    primary["speed_bin_edges_mps"] = SLOW_REGIME_SPEED_EDGES_MPS
+    primary["ttc_bin_edges_s"] = SLOW_REGIME_TTC_EDGES_S
+    # Every bin is "easy": disable the curriculum's hard-bin down-weighting.
+    primary["hard_speed_above_mps"] = 10.0 * SLOW_REGIME_MAX_SPEED_MPS
+    primary["hard_ttc_below_s"] = 0.1 * SLOW_REGIME_TTC_EDGES_S[0]
+    primary["min_intersection_delay_s"] = SLOW_REGIME_DELAY_RANGE_S[0]
+    primary["max_intersection_delay_s"] = SLOW_REGIME_DELAY_RANGE_S[1]
+    if dense_encounters:
+      primary["ttc_bin_edges_s"] = SLOW_REGIME_DENSE_TTC_EDGES_S
+      primary["min_intersection_delay_s"] = SLOW_REGIME_DENSE_DELAY_RANGE_S[0]
+      primary["max_intersection_delay_s"] = SLOW_REGIME_DENSE_DELAY_RANGE_S[1]
+  if filter_gated_ee_termination:
+    stock = cfg.terminations["ee_body_pos"]
+    cfg.terminations["ee_body_pos"] = TerminationTermCfg(
+      func=mdp.bad_motion_body_pos_z_only_filter_gated,
+      params={
+        "command_name": "motion",
+        "threshold": stock.params["threshold"],
+        "loosened_threshold": EE_LOOSENED_THRESHOLD_M,
+        "activation_threshold_rad": 0.05,
+        "body_names": tuple(stock.params["body_names"]),
+      },
+    )
+  # At deployment only the raw reference and the learned adjuster exist, so
+  # the actor must observe the raw anchor orientation, not the privileged
+  # whole-body FK correction carried by anchor_quat_w. Swap only the actor
+  # group's term func; keep its name/params/noise/position (the co-adjust
+  # command offset and 154-dim actor layout depend on the term order). The
+  # critic keeps mjlab's filtered-reference term.
+  cfg.observations["actor"].terms["motion_anchor_ori_b"].func = (
+    mdp.raw_motion_anchor_ori_b
+  )
+  for name in tuple(cfg.rewards):
+    if name not in _NOMINAL_TRACKING_REWARD_NAMES:
+      cfg.rewards.pop(name)
+  missing = set(_NOMINAL_TRACKING_REWARD_NAMES) - set(cfg.rewards)
+  if missing:
+    raise ValueError(f"nominal tracking rewards missing: {sorted(missing)}")
+  if active_joint_reward:
+    cfg.rewards["motion_active_joint_pos"] = RewardTermCfg(
+      func=mdp.active_correction_joint_tracking_exp,
+      weight=1.0,
+      params={
+        "command_name": "motion",
+        "std": 0.4,
+        "activation_threshold_rad": 0.05,
+      },
+    )
+  return cfg
+
+
 def unitree_g1_nominal_lidar_debug_env_cfg(
   play: bool = False,
+  has_state_estimation: bool = True,
 ) -> ManagerBasedRlEnvCfg:
   """Build the upstream nominal tracker with a visualization-only LiDAR.
 
@@ -534,7 +1115,10 @@ def unitree_g1_nominal_lidar_debug_env_cfg(
   checkpoints remain strictly input-compatible. The animated human only gives
   the debug rays useful geometry to hit; the nominal policy cannot react to it.
   """
-  cfg = unitree_g1_flat_tracking_env_cfg(play=play)
+  cfg = unitree_g1_flat_tracking_env_cfg(
+    has_state_estimation=has_state_estimation,
+    play=play,
+  )
   cfg.scene.entities["robot"].spec_fn = get_g1_with_mid360_spec
   cfg.scene.entities[HUMAN_ENTITY_NAME] = EntityCfg(
     spec_fn=partial(get_soma_capsule_crowd_spec, collidable=False),
@@ -704,17 +1288,21 @@ def unitree_g1_reference_filter_policy_lidar_demo_env_cfg(
   play: bool = False,
   scan_hz: int = 5,
 ) -> ManagerBasedRlEnvCfg:
-  """Track the privileged filtered reference with the nominal policy.
+  """Track a live-aligned privileged reference with the no-state policy.
 
-  This keeps the upstream actor's 160-value observation contract and all
-  physics, contacts, actuation, and tracking terminations.  Unlike the exact
-  replay demo, the filter changes only the desired motion command and never
-  writes the filtered pose into MuJoCo during a policy step.
+  This keeps the no-state actor's 154-value observation contract and all
+  physics, contacts, actuation, and tracking terminations. Before filtering,
+  each source frame is translated and yaw-aligned to the live robot. Unlike
+  the exact replay demo, the filter changes only the desired motion command
+  and never writes the filtered pose into MuJoCo during a policy step.
   """
   if scan_hz not in (5, 10):
     raise ValueError(f"scan_hz must be 5 or 10, got {scan_hz}")
 
-  cfg = unitree_g1_nominal_lidar_debug_env_cfg(play=play)
+  cfg = unitree_g1_nominal_lidar_debug_env_cfg(
+    play=play,
+    has_state_estimation=False,
+  )
   # The nominal flat task sizes these buffers for the robot alone.  The live
   # 18-capsule action human can transiently add roughly forty broadphase pairs.
   cfg.sim.nconmax = 70
@@ -729,6 +1317,7 @@ def unitree_g1_reference_filter_policy_lidar_demo_env_cfg(
     **{field.name: getattr(motion_cfg, field.name) for field in fields(motion_cfg)},
     obstacle_entity_names=(HUMAN_ENTITY_NAME, PRIMARY_HUMAN_ENTITY_NAME),
     write_reference_to_sim=False,
+    align_reference_to_robot_each_step=True,
   )
   filtered_command_cfg.pose_range = {}
   filtered_command_cfg.velocity_range = {}

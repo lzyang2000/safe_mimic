@@ -396,6 +396,33 @@ class PackedNpzMotionLib:
   def total_frames(self) -> int:
     return self._all_joint_pos.shape[0]
 
+  # Flat, clip-concatenated frame tensors (already restricted to the tracked
+  # bodies). Clip ``k`` occupies rows ``[motion_start_idx[k],
+  # motion_start_idx[k] + motion_num_frames[k])``.
+  @property
+  def all_joint_pos(self) -> torch.Tensor:
+    return self._all_joint_pos
+
+  @property
+  def all_joint_vel(self) -> torch.Tensor:
+    return self._all_joint_vel
+
+  @property
+  def all_body_pos_w(self) -> torch.Tensor:
+    return self._all_body_pos_w
+
+  @property
+  def all_body_quat_w(self) -> torch.Tensor:
+    return self._all_body_quat_w
+
+  @property
+  def all_body_lin_vel_w(self) -> torch.Tensor:
+    return self._all_body_lin_vel_w
+
+  @property
+  def all_body_ang_vel_w(self) -> torch.Tensor:
+    return self._all_body_ang_vel_w
+
   @property
   def resident_bytes(self) -> int:
     """Bytes occupied by packed frame tensors, excluding tiny indexes."""

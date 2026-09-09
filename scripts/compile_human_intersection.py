@@ -35,7 +35,9 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--temporal-labels",
     type=Path,
-    default=Path("artifacts/bones-seed/metadata/seed_metadata_v002_temporal_labels.jsonl"),
+    default=Path(
+      "artifacts/bones-seed/metadata/seed_metadata_v002_temporal_labels.jsonl"
+    ),
   )
   parser.add_argument("--robot-motion", type=Path, required=True)
   parser.add_argument("--robot-root-body-index", type=int, default=0)

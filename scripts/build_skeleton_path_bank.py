@@ -58,9 +58,7 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--output",
     type=Path,
-    default=Path(
-      "artifacts/bones-seed/datasets/skeleton_path_bank_transition_v3"
-    ),
+    default=Path("artifacts/bones-seed/datasets/skeleton_path_bank_transition_v3"),
   )
   parser.add_argument(
     "--storage-dtype", choices=("float16", "float32"), default="float16"
@@ -209,9 +207,7 @@ def main() -> None:
       arrays["local_quaternions"][row, :frame_count] = local_quaternions[indices]
       if frame_count < max_frames:
         arrays["local_positions"][row, frame_count:] = local_positions[indices[-1]]
-        arrays["local_quaternions"][row, frame_count:] = local_quaternions[
-          indices[-1]
-        ]
+        arrays["local_quaternions"][row, frame_count:] = local_quaternions[indices[-1]]
       arrays["frame_counts"][row] = frame_count
       arrays["ground_z"][row] = float(
         np.percentile(positions[indices][:, foot_indices, 2], 2.0)
@@ -230,11 +226,7 @@ def main() -> None:
     array.flush()
   np.save(temporary / "parents.npy", runtime_parents)
   pose_storage_bytes = (
-    len(records)
-    * max_frames
-    * len(RUNTIME_JOINT_NAMES)
-    * 7
-    * storage_dtype.itemsize
+    len(records) * max_frames * len(RUNTIME_JOINT_NAMES) * 7 * storage_dtype.itemsize
   )
   config = {
     "format_version": 1,

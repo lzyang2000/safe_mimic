@@ -175,9 +175,7 @@ class LinkCbfReferenceFilterCfg:
         self.max_standing_velocity_correction_rps
       ),
       "posture_lookahead_s": self.posture_lookahead_s,
-      "posture_activation_clearance_m": (
-        self.posture_activation_clearance_m
-      ),
+      "posture_activation_clearance_m": (self.posture_activation_clearance_m),
       "posture_hold_s": self.posture_hold_s,
       "posture_motion_cost": self.posture_motion_cost,
     }
@@ -236,29 +234,36 @@ def arm_posture_velocity_candidates(
   joint_names: tuple[str, ...],
   joint_pos: torch.Tensor,
   standing_joint_pos: torch.Tensor,
+  posture_joint_mask: torch.Tensor | None = None,
+  left_joint_mask: torch.Tensor | None = None,
+  right_joint_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
   """Return preserve/both-down/left-down/right-down batched candidates."""
 
-  posture_joint_mask = torch.tensor(
-    [
+  if posture_joint_mask is None:
+    posture_flags = [
       any(token in joint_name for token in cfg.posture_joint_name_tokens)
       for joint_name in joint_names
-    ],
-    dtype=torch.bool,
-    device=joint_pos.device,
-  )
-  if not torch.any(posture_joint_mask):
-    raise ValueError("lookahead posture selection requires posture joints")
-  left_joint_mask = posture_joint_mask & torch.tensor(
-    [joint_name.startswith("left_") for joint_name in joint_names],
-    dtype=torch.bool,
-    device=joint_pos.device,
-  )
-  right_joint_mask = posture_joint_mask & torch.tensor(
-    [joint_name.startswith("right_") for joint_name in joint_names],
-    dtype=torch.bool,
-    device=joint_pos.device,
-  )
+    ]
+    if not any(posture_flags):
+      raise ValueError("lookahead posture selection requires posture joints")
+    posture_joint_mask = torch.tensor(
+      posture_flags,
+      dtype=torch.bool,
+      device=joint_pos.device,
+    )
+  if left_joint_mask is None:
+    left_joint_mask = posture_joint_mask & torch.tensor(
+      [joint_name.startswith("left_") for joint_name in joint_names],
+      dtype=torch.bool,
+      device=joint_pos.device,
+    )
+  if right_joint_mask is None:
+    right_joint_mask = posture_joint_mask & torch.tensor(
+      [joint_name.startswith("right_") for joint_name in joint_names],
+      dtype=torch.bool,
+      device=joint_pos.device,
+    )
   both_down = cfg.standing_posture_gain * (standing_joint_pos - joint_pos)
   both_down = torch.clamp(
     both_down,
@@ -308,20 +313,22 @@ def select_lookahead_arm_posture_velocity(
   capsule_quaternions_w: torch.Tensor,
   capsule_sizes: torch.Tensor,
   obstacle_velocities_w: torch.Tensor,
+  arm_link_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
   """Choose the candidate improving each threatened arm link/capsule pair."""
 
-  device = candidate_joint_velocities.device
-  arm_link_mask = torch.tensor(
-    [
+  if arm_link_mask is None:
+    arm_link_flags = [
       any(token in link_name for token in cfg.arm_joint_name_tokens)
       for link_name in link_names
-    ],
-    dtype=torch.bool,
-    device=device,
-  )
-  if not torch.any(arm_link_mask):
-    raise ValueError("lookahead posture selection requires arm links")
+    ]
+    if not any(arm_link_flags):
+      raise ValueError("lookahead posture selection requires arm links")
+    arm_link_mask = torch.tensor(
+      arm_link_flags,
+      dtype=torch.bool,
+      device=candidate_joint_velocities.device,
+    )
 
   predicted_centers = (
     capsule_centers_w + cfg.posture_lookahead_s * obstacle_velocities_w
@@ -344,9 +351,7 @@ def select_lookahead_arm_posture_velocity(
   denominator = (segment * segment).sum(dim=-1).clamp_min(1e-12)
   fraction = ((relative * segment).sum(dim=-1) / denominator).clamp(0.0, 1.0)
   closest_w = starts_w[:, None] + fraction[..., None] * segment
-  distance = torch.linalg.vector_norm(
-    candidate_link_positions_w - closest_w, dim=-1
-  )
+  distance = torch.linalg.vector_norm(candidate_link_positions_w - closest_w, dim=-1)
   clearance = distance - nearest_sizes[:, None, :, 0] - cfg.link_radius_m
   # A pair is worth considering when it is active now or when preserving the
   # reference will put it inside the activation margin at the lookahead time.
@@ -356,26 +361,20 @@ def select_lookahead_arm_posture_velocity(
   threatened_arm_links = arm_link_mask[None] & (
     link_active | (clearance[:, 0] <= cfg.posture_activation_clearance_m)
   )
-  capped_clearance = torch.minimum(
-    clearance,
-    torch.tensor(cfg.posture_activation_clearance_m, device=device),
-  )
+  capped_clearance = torch.clamp_max(clearance, cfg.posture_activation_clearance_m)
   threat_count = threatened_arm_links.sum(dim=1).clamp_min(1)
   predicted_clearance_score = (
     torch.where(threatened_arm_links[:, None], capped_clearance, 0.0).sum(dim=2)
     / threat_count[:, None]
   )
-  motion_cost = (
-    cfg.posture_motion_cost
-    * candidate_joint_velocities.square().mean(dim=-1)
+  motion_cost = cfg.posture_motion_cost * candidate_joint_velocities.square().mean(
+    dim=-1
   )
   selected_ids = torch.argmax(predicted_clearance_score - motion_cost, dim=1)
   selected = torch.gather(
     candidate_joint_velocities,
     1,
-    selected_ids[:, None, None].expand(
-      -1, 1, candidate_joint_velocities.shape[-1]
-    ),
+    selected_ids[:, None, None].expand(-1, 1, candidate_joint_velocities.shape[-1]),
   ).squeeze(1)
   has_arm_threat = threatened_arm_links.any(dim=1)
   return torch.where(has_arm_threat[:, None], selected, 0.0)

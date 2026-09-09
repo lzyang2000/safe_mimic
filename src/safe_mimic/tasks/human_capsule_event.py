@@ -12,6 +12,7 @@ from mjlab.managers.manager_base import ManagerTermBase
 
 from safe_mimic.assets.soma_capsules import (
   HUMAN_INACTIVE_HEIGHT_M,
+  HUMAN_RAY_BODY_NAME,
   human_capsule_body_name,
 )
 from safe_mimic.motions.composed_skeleton_bank import (
@@ -31,28 +32,73 @@ from safe_mimic.motions.soma_mesh import (
   load_soma_mesh_skin,
   prepare_soma_viser_skin,
 )
+from safe_mimic.tasks.encounter_sampling import (
+  EncounterSampler,
+  encounter_sampler_overrides,
+  read_collision_terms,
+)
+from safe_mimic.tasks.human_target import robot_intersection_target_from_qpos
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.managers.event_manager import EventTermCfg
 
 
-def _yaw_from_quaternion(quaternion_wxyz: torch.Tensor) -> torch.Tensor:
-  w, x, y, z = quaternion_wxyz.unbind(dim=-1)
-  return torch.atan2(
-    2.0 * (w * z + x * y),
-    1.0 - 2.0 * (y * y + z * z),
-  )
+DEFAULT_APPROACH_SPEED_FLOOR_MPS = 0.3
+DEFAULT_ROBOT_SPEED_HALF_LIFE_S = 1.0
 
 
-@requires_model_fields("geom_size", "geom_rbound", "geom_aabb")
+def limit_intersection_delay_to_speed(
+  *,
+  delay_s: torch.Tensor,
+  spawn_radius_m: torch.Tensor,
+  max_speed_mps: torch.Tensor,
+) -> torch.Tensor:
+  """Stretch a scheduled intersection delay until the approach obeys a cap.
+
+  The online composer imposes the approach speed through the schedule, not
+  through the source clip: the human spawns on a ring of ``spawn_radius_m``
+  around the robot and its entry walk is time-warped (``playback_speed``) so
+  it arrives after ``delay_s``. The realized approach speed is therefore
+  ``spawn_radius_m / delay_s``, the same definition the TTC encounter sampler
+  uses. Selecting slower source clips cannot bound it, because every clip is
+  re-warped to whatever the schedule demands.
+
+  Keeping the radius fixed and stretching only the delay preserves the
+  encounter's geometry (spawn ring, crossing angle, intersection point) and
+  changes just how fast the human walks it. Returns a new tensor; inputs are
+  not mutated.
+  """
+  required_delay_s = spawn_radius_m / max_speed_mps.clamp_min(1.0e-6)
+  return torch.maximum(delay_s, required_delay_s)
+
+
+def advance_robot_speed_cap(
+  previous_peak_mps: torch.Tensor,
+  planar_speed_mps: torch.Tensor,
+  *,
+  decay: float,
+  floor: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Track the robot's recent peak planar speed and the cap derived from it.
+
+  The peak rises instantly to a new maximum and otherwise decays, so a
+  momentary stop mid-stride does not collapse the cap. The returned cap is
+  floored: a standing robot would otherwise cap the human at zero and the
+  encounter would never occur. Returns ``(peak, cap)`` as new tensors.
+  """
+  peak = torch.maximum(planar_speed_mps, previous_peak_mps * decay)
+  return peak, peak.clamp_min(floor)
+
+
+@requires_model_fields("geom_pos", "geom_quat", "geom_size", "geom_rbound", "geom_aabb")
 class HumanCapsuleMotion(ManagerTermBase):
   """Compose future-crossing human paths and drive their mocap capsules.
 
   The pruned skeleton bank and transition graph live on the environment device.
   Every reset samples ``walk -> action -> walk``, performs PHP-style root
   alignment and velocity-aware skeleton-space inertialization, and places the
-  action midpoint on the robot reference path. Only current capsule poses are
+  action midpoint on the robot's live pose. Only current capsule poses are
   retained outside the source bank.
   """
 
@@ -85,13 +131,37 @@ class HumanCapsuleMotion(ManagerTermBase):
     self.max_human_height_m = float(
       params.get("max_human_height_m", DEFAULT_MAX_HUMAN_HEIGHT_M)
     )
+    # Play-time encounter cap, toggled from the viser panel. Default off so
+    # training and every recorded benchmark keep the sampled approach speeds.
+    self.limit_approach_speed_to_robot = bool(
+      params.get("limit_approach_speed_to_robot", False)
+    )
+    self.approach_speed_floor_mps = float(
+      params.get("approach_speed_floor_mps", DEFAULT_APPROACH_SPEED_FLOOR_MPS)
+    )
+    self.robot_speed_half_life_s = float(
+      params.get("robot_speed_half_life_s", DEFAULT_ROBOT_SPEED_HALF_LIFE_S)
+    )
     self.show_mesh = bool(params.get("show_mesh", False))
+    self.print_velocity = bool(params.get("print_velocity", False))
+    self.velocity_print_interval_s = float(
+      params.get("velocity_print_interval_s", 0.5)
+    )
+    self.use_shared_obstacle_free_mask = bool(
+      params.get("use_shared_obstacle_free_mask", False)
+    )
     mesh_skin_path = params.get("mesh_skin_path")
     self.mesh_skin_path = (
       Path(str(mesh_skin_path)) if mesh_skin_path is not None else None
     )
     if self.show_mesh and self.mesh_skin_path is None:
       raise ValueError("show_mesh requires mesh_skin_path")
+    if self.velocity_print_interval_s <= 0.0:
+      raise ValueError("human velocity print interval must be positive")
+    if self.approach_speed_floor_mps <= 0.0:
+      raise ValueError("approach speed floor must be positive")
+    if self.robot_speed_half_life_s <= 0.0:
+      raise ValueError("robot speed half-life must be positive")
     if not (0.0 <= self.min_intersection_delay_s <= self.max_intersection_delay_s):
       raise ValueError("invalid human intersection delay range")
     if not 0.0 < self.min_crossing_angle_rad <= self.max_crossing_angle_rad:
@@ -106,6 +176,25 @@ class HumanCapsuleMotion(ManagerTermBase):
       0.0 < self.min_initial_spawn_radius_m <= self.max_initial_spawn_radius_m
     ):
       raise ValueError("initial human spawn-radius range is invalid")
+    self.encounter_sampling = str(params.get("encounter_sampling", "independent"))
+    if self.encounter_sampling not in ("independent", "ttc"):
+      raise ValueError("encounter_sampling must be 'independent' or 'ttc'")
+    self._encounter_sampler: EncounterSampler | None = None
+    if self.encounter_sampling == "ttc":
+      if (
+        self.min_initial_spawn_radius_m is None
+        or self.max_initial_spawn_radius_m is None
+      ):
+        raise ValueError("ttc encounter sampling requires spawn-radius bounds")
+      self._encounter_sampler = EncounterSampler(
+        env.num_envs,
+        env.device,
+        spawn_radius_clamp_m=(
+          self.min_initial_spawn_radius_m,
+          self.max_initial_spawn_radius_m,
+        ),
+        **encounter_sampler_overrides(params),
+      )
 
     self.bank = SkeletonPathBank(Path(params["skeleton_bank_path"]))
     self.sampler = OnlineComposedHumanSampler(
@@ -119,9 +208,35 @@ class HumanCapsuleMotion(ManagerTermBase):
     )
     self._viser_skin: SomaViserSkin | None = None
     self._viser_mesh_handles: dict[int, Any] = {}
+    self._viser_velocity_label_handles: dict[int, Any] = {}
     self._viser_active_env: int | None = None
     self._viser_mesh_revisions: dict[int, int] = {}
     self._pose_revision = 0
+    self._velocity_previous_root_w: torch.Tensor | None = None
+    self._velocity_previous_time_s: torch.Tensor | None = None
+    self._velocity_valid: torch.Tensor | None = None
+    self._velocity_measurement_valid: torch.Tensor | None = None
+    self._velocity_w: torch.Tensor | None = None
+    self._velocity_closing_speed_mps: torch.Tensor | None = None
+    self._velocity_distance_m: torch.Tensor | None = None
+    self._velocity_last_print_s = -float("inf")
+    self._robot_speed_peak_mps = torch.zeros(env.num_envs, device=env.device)
+    if self.print_velocity:
+      self._velocity_previous_root_w = torch.zeros(
+        (env.num_envs, 3), device=env.device
+      )
+      self._velocity_previous_time_s = torch.zeros(
+        env.num_envs, device=env.device
+      )
+      self._velocity_valid = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+      )
+      self._velocity_measurement_valid = torch.zeros_like(self._velocity_valid)
+      self._velocity_w = torch.zeros((env.num_envs, 3), device=env.device)
+      self._velocity_closing_speed_mps = torch.zeros(
+        env.num_envs, device=env.device
+      )
+      self._velocity_distance_m = torch.zeros(env.num_envs, device=env.device)
     transition_index = Path(params["transition_index_path"])
     with np.load(transition_index / "edges.npz", allow_pickle=False) as graph:
       self._action_path_ids = torch.as_tensor(
@@ -168,16 +283,46 @@ class HumanCapsuleMotion(ManagerTermBase):
     entity = env.scene[self.human_entity_name]
     expected_names = tuple(spec.name for spec in SOMA_CAPSULE_SPECS)
     expected_bodies = tuple(human_capsule_body_name(name) for name in expected_names)
-    if tuple(entity.body_names) != expected_bodies:
-      raise ValueError("runtime human entity body order does not match capsules")
-    body_ids = entity.indexing.body_ids.detach().cpu().numpy().astype(np.int64)
-    mocap_ids = np.asarray(env.sim.mj_model.body_mocapid)[body_ids]
-    if np.any(mocap_ids < 0) or len(np.unique(mocap_ids)) != len(expected_names):
-      raise ValueError("every human capsule body must have a unique mocap id")
-    self._mocap_ids = torch.as_tensor(mocap_ids, dtype=torch.long, device=env.device)
+    self._direct_geom_poses = tuple(entity.body_names) == (HUMAN_RAY_BODY_NAME,)
+    self._mocap_ids: torch.Tensor | None = None
+    if not self._direct_geom_poses:
+      if tuple(entity.body_names) != expected_bodies:
+        raise ValueError("runtime human entity body order does not match capsules")
+      body_ids = entity.indexing.body_ids.detach().cpu().numpy().astype(np.int64)
+      mocap_ids = np.asarray(env.sim.mj_model.body_mocapid)[body_ids]
+      if np.any(mocap_ids < 0) or len(np.unique(mocap_ids)) != len(expected_names):
+        raise ValueError("every human capsule body must have a unique mocap id")
+      self._mocap_ids = torch.as_tensor(
+        mocap_ids, dtype=torch.long, device=env.device
+      )
     self._geom_ids = entity.indexing.geom_ids.to(dtype=torch.long)
     if self._geom_ids.numel() != len(expected_names):
       raise ValueError("runtime human entity must have one geom per capsule")
+
+  def _deactivate(self, env_ids: torch.Tensor) -> None:
+    """Park selected humans below the scene until their next episode reset."""
+    if len(env_ids) == 0:
+      return
+    if self._encounter_sampler is not None:
+      # Human-less episodes must never be attributed to an encounter bin.
+      self._encounter_sampler.clear_assignments(env_ids)
+    poses = self.sampler._poses
+    poses.centers_w[env_ids] = 0.0
+    poses.centers_w[env_ids, :, 2] = HUMAN_INACTIVE_HEIGHT_M
+    poses.radii_m[env_ids] = self.sampler.base_radii
+    poses.half_lengths_m[env_ids] = torch.where(
+      self.sampler.is_sphere,
+      torch.zeros_like(self.sampler.base_radii),
+      torch.full_like(self.sampler.base_radii, 0.05),
+    )
+    poses.active[env_ids] = False
+    self.sampler.dirty[env_ids] = False
+    self.sampler.scheduled[env_ids] = False
+    self.sampler.next_update_times_s[env_ids] = torch.inf
+    if self._velocity_valid is not None:
+      self._velocity_valid[env_ids] = False
+    if self._velocity_measurement_valid is not None:
+      self._velocity_measurement_valid[env_ids] = False
 
   def _global_time_s(self) -> float:
     return float(self._env.common_step_counter) * self._env.step_dt
@@ -341,40 +486,81 @@ class HumanCapsuleMotion(ManagerTermBase):
     sampler.current_translation_w[env_ids] = translation
     sampler.dirty[env_ids] = True
 
-  def _schedule(self, env_ids: torch.Tensor, global_time_s: float) -> None:
+  def _update_robot_speed_peak(self) -> None:
+    """Advance the decayed peak of the robot's planar speed by one step."""
+    robot = self._env.scene[self.robot_entity_name]
+    planar_speed = torch.linalg.vector_norm(
+      robot.data.root_link_lin_vel_w[:, :2], dim=-1
+    )
+    decay = 0.5 ** (self._env.step_dt / self.robot_speed_half_life_s)
+    self._robot_speed_peak_mps, _ = advance_robot_speed_cap(
+      self._robot_speed_peak_mps,
+      planar_speed,
+      decay=decay,
+      floor=self.approach_speed_floor_mps,
+    )
+
+  def _speed_limited_delay_steps(
+    self,
+    env_ids: torch.Tensor,
+    delay_steps: torch.Tensor,
+    spawn_radius_m: torch.Tensor,
+  ) -> torch.Tensor:
+    """Stretch the scheduled delay so the human never outruns the robot."""
+    if not self.limit_approach_speed_to_robot:
+      return delay_steps
+    cap = self._robot_speed_peak_mps[env_ids].clamp_min(self.approach_speed_floor_mps)
+    limited_s = limit_intersection_delay_to_speed(
+      delay_s=delay_steps.float() * self._env.step_dt,
+      spawn_radius_m=spawn_radius_m,
+      max_speed_mps=cap,
+    )
+    return torch.round(limited_s / self._env.step_dt).long().clamp_min(1)
+
+  def _schedule(
+    self,
+    env_ids: torch.Tensor,
+    global_time_s: float,
+    collided_since_last: torch.Tensor | None = None,
+  ) -> None:
     if env_ids.numel() == 0:
       return
     env_ids = env_ids.to(device=self.device, dtype=torch.long)
+    if self._velocity_valid is not None:
+      # A newly composed sequence may start elsewhere in world space. Do not
+      # mistake that reset/reschedule discontinuity for physical velocity.
+      self._velocity_valid[env_ids] = False
+    if self._velocity_measurement_valid is not None:
+      self._velocity_measurement_valid[env_ids] = False
     count = len(env_ids)
-    command: Any = self._env.command_manager.get_term(self.command_name)
-    motion = command.motion
-    current_frames = command.time_steps[env_ids]
-    last_frame = int(motion.time_step_total) - 1
 
-    requested_delay = torch.empty(count, device=self.device).uniform_(
-      self.min_intersection_delay_s,
-      self.max_intersection_delay_s,
-    )
+    # TTC-mode draws replace only the two independent uniforms; the sampler
+    # runs up front so the independent path's RNG consumption is unchanged.
+    # A missing flag tensor means a mid-episode reschedule: a collision would
+    # have reset the environment instead, so no collision occurred.
+    sampled = None
+    if self._encounter_sampler is not None:
+      if collided_since_last is None:
+        collided_since_last = torch.zeros(count, dtype=torch.bool, device=self.device)
+      sampled = self._encounter_sampler.sample(
+        env_ids, global_time_s, collided_since_last
+      )
+    if sampled is None:
+      requested_delay = torch.empty(count, device=self.device).uniform_(
+        self.min_intersection_delay_s,
+        self.max_intersection_delay_s,
+      )
+    else:
+      requested_delay = sampled[0]
     requested_steps = torch.round(requested_delay / self._env.step_dt).long()
     delay_steps = requested_steps.clamp_min(1)
-    target_frames = torch.clamp(current_frames + delay_steps, max=last_frame)
     actual_delay_s = delay_steps.float() * self._env.step_dt
-
-    anchor_index = int(command.motion_anchor_body_index)
-    target_positions = motion.body_pos_w[target_frames, anchor_index].clone()
-    target_positions += self._env.scene.env_origins[env_ids]
-    target_quaternions = motion.body_quat_w[target_frames, anchor_index]
-    target_yaw = _yaw_from_quaternion(target_quaternions)
-    before_frames = torch.clamp(target_frames - 2, min=0)
-    after_frames = torch.clamp(target_frames + 2, max=last_frame)
-    before = motion.body_pos_w[before_frames, anchor_index, :2]
-    after = motion.body_pos_w[after_frames, anchor_index, :2]
-    displacement = after - before
-    target_heading = torch.atan2(displacement[:, 1], displacement[:, 0])
-    target_heading = torch.where(
-      torch.linalg.vector_norm(displacement, dim=-1) < 0.03,
-      target_yaw,
-      target_heading,
+    target_positions, target_yaw, target_heading = (
+      robot_intersection_target_from_qpos(
+        self._env,
+        env_ids,
+        self.robot_entity_name,
+      )
     )
 
     angle = torch.empty(count, device=self.device).uniform_(
@@ -393,13 +579,17 @@ class HumanCapsuleMotion(ManagerTermBase):
     )
     robot_positions = self._robot_root_positions_from_qpos(env_ids)
     spawn_angle = torch.rand(count, device=self.device) * (2.0 * torch.pi)
-    if self.min_initial_spawn_radius_m is None:
+    if sampled is not None:
+      spawn_radius = sampled[2]
+    elif self.min_initial_spawn_radius_m is None:
       spawn_radius = torch.zeros(count, device=self.device)
     else:
       assert self.max_initial_spawn_radius_m is not None
       spawn_radius = torch.empty(count, device=self.device).uniform_(
         self.min_initial_spawn_radius_m, self.max_initial_spawn_radius_m
       )
+    delay_steps = self._speed_limited_delay_steps(env_ids, delay_steps, spawn_radius)
+    actual_delay_s = delay_steps.float() * self._env.step_dt
     spawn_positions = robot_positions.clone()
     spawn_positions[:, 0] += spawn_radius * torch.cos(spawn_angle)
     spawn_positions[:, 1] += spawn_radius * torch.sin(spawn_angle)
@@ -429,18 +619,35 @@ class HumanCapsuleMotion(ManagerTermBase):
       spawn_positions_w=spawn_positions,
     )
 
-  def _write_updated_poses(self, global_time_s: float) -> None:
+  def _write_updated_poses(
+    self,
+    global_time_s: float,
+    *,
+    force_ids: torch.Tensor | None = None,
+  ) -> None:
     poses = self.sampler.sample_held(global_time_s)
     env_ids = self.sampler.last_updated_env_ids
+    if force_ids is not None:
+      env_ids = torch.unique(torch.cat((env_ids, force_ids)))
     if len(env_ids) == 0:
       return
-    env_grid, mocap_grid = torch.meshgrid(env_ids, self._mocap_ids, indexing="ij")
-    self._env.sim.data.mocap_pos[env_grid, mocap_grid] = poses.centers_w[env_ids]
-    self._env.sim.data.mocap_quat[env_grid, mocap_grid] = poses.quaternions_wxyz[
-      env_ids
-    ]
-
+    self._update_velocity_diagnostic(env_ids, global_time_s)
     env_grid, geom_grid = torch.meshgrid(env_ids, self._geom_ids, indexing="ij")
+    if self._direct_geom_poses:
+      self._env.sim.model.geom_pos[env_grid, geom_grid] = poses.centers_w[env_ids]
+      self._env.sim.model.geom_quat[env_grid, geom_grid] = (
+        poses.quaternions_wxyz[env_ids]
+      )
+    else:
+      assert self._mocap_ids is not None
+      env_grid, mocap_grid = torch.meshgrid(
+        env_ids, self._mocap_ids, indexing="ij"
+      )
+      self._env.sim.data.mocap_pos[env_grid, mocap_grid] = poses.centers_w[env_ids]
+      self._env.sim.data.mocap_quat[env_grid, mocap_grid] = (
+        poses.quaternions_wxyz[env_ids]
+      )
+
     radii = poses.radii_m[env_ids]
     half_lengths = poses.half_lengths_m[env_ids]
     model = self._env.sim.model
@@ -454,14 +661,135 @@ class HumanCapsuleMotion(ManagerTermBase):
     )
     self._pose_revision += 1
 
+  def _update_velocity_diagnostic(
+    self,
+    env_ids: torch.Tensor,
+    global_time_s: float,
+  ) -> None:
+    """Measure velocity between actual held-pose updates and print env zero."""
+    if not self.print_velocity:
+      return
+    assert self._velocity_previous_root_w is not None
+    assert self._velocity_previous_time_s is not None
+    assert self._velocity_valid is not None
+    assert self._velocity_measurement_valid is not None
+    assert self._velocity_w is not None
+    assert self._velocity_closing_speed_mps is not None
+    assert self._velocity_distance_m is not None
+
+    roots_w = self.sampler._poses.root_positions_w[env_ids]  # noqa: SLF001
+    active = self.sampler._poses.active[env_ids]  # noqa: SLF001
+    elapsed_s = global_time_s - self._velocity_previous_time_s[env_ids]
+    valid = self._velocity_valid[env_ids] & active & (elapsed_s > 1.0e-6)
+    velocities_w = (
+      roots_w - self._velocity_previous_root_w[env_ids]
+    ) / elapsed_s[:, None].clamp_min(1.0e-6)
+    robot_data = self._env.scene[self.robot_entity_name].data
+    toward_robot_xy = robot_data.root_link_pos_w[env_ids, :2] - roots_w[:, :2]
+    distance_xy = torch.linalg.vector_norm(toward_robot_xy, dim=-1)
+    relative_velocity_xy = (
+      velocities_w[:, :2] - robot_data.root_link_lin_vel_w[env_ids, :2]
+    )
+    closing_speed = torch.sum(
+      relative_velocity_xy
+      * toward_robot_xy
+      / distance_xy[:, None].clamp_min(1.0e-6),
+      dim=-1,
+    )
+    self._velocity_measurement_valid[env_ids] = valid
+    self._velocity_w[env_ids] = torch.where(
+      valid[:, None], velocities_w, torch.zeros_like(velocities_w)
+    )
+    self._velocity_closing_speed_mps[env_ids] = torch.where(
+      valid, closing_speed, 0.0
+    )
+    self._velocity_distance_m[env_ids] = distance_xy
+
+    env_zero_row = (env_ids == 0).nonzero().flatten()
+    due_to_print = (
+      global_time_s - self._velocity_last_print_s
+      >= self.velocity_print_interval_s
+    )
+    if len(env_zero_row) and due_to_print:
+      row = int(env_zero_row[0])
+      if bool(valid[row]):
+        velocity = velocities_w[row]
+        speed_xy = torch.linalg.vector_norm(velocity[:2])
+        vx, vy, vz, speed, closing, distance, playback = (
+          float(value)
+          for value in (
+            velocity[0],
+            velocity[1],
+            velocity[2],
+            speed_xy,
+            closing_speed[row],
+            distance_xy[row],
+            self.sampler.playback_speed[0],
+          )
+        )
+        print(
+          "[primary-human] "
+          f"v_w=({vx:+.2f}, {vy:+.2f}, {vz:+.2f}) m/s  "
+          f"speed_xy={speed:.2f} m/s  closing={closing:+.2f} m/s  "
+          f"distance={distance:.2f} m  playback={playback:.2f}x",
+          flush=True,
+        )
+        self._velocity_last_print_s = global_time_s
+
+    self._velocity_previous_root_w[env_ids] = roots_w
+    self._velocity_previous_time_s[env_ids] = global_time_s
+    self._velocity_valid[env_ids] = active
+
+  def _velocity_label_text(self, env_index: int) -> str:
+    assert self._velocity_w is not None
+    assert self._velocity_closing_speed_mps is not None
+    assert self._velocity_distance_m is not None
+    velocity = self._velocity_w[env_index]
+    speed_xy = torch.linalg.vector_norm(velocity[:2])
+    vx, vy, vz, speed, closing, distance = (
+      float(value)
+      for value in (
+        velocity[0],
+        velocity[1],
+        velocity[2],
+        speed_xy,
+        self._velocity_closing_speed_mps[env_index],
+        self._velocity_distance_m[env_index],
+      )
+    )
+    return (
+      f"human v=({vx:+.2f}, {vy:+.2f}, {vz:+.2f}) m/s\n"
+      f"speed={speed:.2f}  closing={closing:+.2f}  distance={distance:.2f} m"
+    )
+
   def reset(self, env_ids: torch.Tensor | slice | None) -> None:
     if env_ids is None or isinstance(env_ids, slice):
       resolved = self._all_env_ids()
     else:
       resolved = env_ids.to(device=self.device, dtype=torch.long)
+    active = resolved
+    inactive = torch.empty(0, dtype=torch.long, device=self.device)
+    if self.use_shared_obstacle_free_mask:
+      shared_mask = getattr(self._env, "_safe_mimic_obstacle_free_envs", None)
+      if shared_mask is None:
+        raise RuntimeError("shared obstacle-free mask was not initialized")
+      inactive = resolved[shared_mask[resolved]]
+      active = resolved[~shared_mask[resolved]]
+    # Event resets run after terminations are computed and before the
+    # termination manager resets, so the term buffers still describe the
+    # episodes that just ended. Environments going human-less attribute their
+    # pending outcome here instead of at a schedule they will not receive.
+    active_collided: torch.Tensor | None = None
+    if self._encounter_sampler is not None:
+      collided = read_collision_terms(
+        self._env.termination_manager, self.num_envs, self.device
+      )
+      self._encounter_sampler.observe_terminal(inactive, collided[inactive])
+      active_collided = collided[active]
     now = self._global_time_s()
-    self._schedule(resolved, now)
-    self._write_updated_poses(now)
+    self._deactivate(inactive)
+    self._schedule(active, now, collided_since_last=active_collided)
+    self._write_updated_poses(now, force_ids=inactive)
 
   def __call__(
     self,
@@ -470,6 +798,7 @@ class HumanCapsuleMotion(ManagerTermBase):
     **_: object,
   ) -> None:
     del env, env_ids
+    self._update_robot_speed_peak()
     now = self._global_time_s()
     expired = self.sampler.expired_env_ids(now)
     if len(expired):
@@ -500,10 +829,18 @@ class HumanCapsuleMotion(ManagerTermBase):
       previous = self._viser_mesh_handles.get(self._viser_active_env)
       if previous is not None:
         previous.visible = False
+      previous_label = self._viser_velocity_label_handles.get(
+        self._viser_active_env
+      )
+      if previous_label is not None:
+        previous_label.visible = False
     self._viser_active_env = env_index
 
     skin = self._load_viser_skin()
     handle = self._viser_mesh_handles.get(env_index)
+    scene_offset = np.asarray(
+      getattr(visualizer, "_scene_offset", np.zeros(3)), dtype=np.float32
+    )
     if handle is None or self._viser_mesh_revisions.get(env_index) != (
       self._pose_revision
     ):
@@ -512,9 +849,6 @@ class HumanCapsuleMotion(ManagerTermBase):
       body_scale = self.sampler.body_scale_xyz[env_index].detach().cpu().numpy()
       yaw = float(self.sampler.placement_yaw[env_index])
       translation = self.sampler.current_translation_w[env_index].detach().cpu().numpy()
-      scene_offset = np.asarray(
-        getattr(visualizer, "_scene_offset", np.zeros(3)), dtype=np.float32
-      )
       vertices_w = skin.skin_vertices_mujoco(
         positions,
         quaternions,
@@ -538,4 +872,35 @@ class HumanCapsuleMotion(ManagerTermBase):
       else:
         handle.vertices = vertices_w
       self._viser_mesh_revisions[env_index] = self._pose_revision
-    handle.visible = bool(self.sampler._poses.active[env_index])
+    human_active = bool(self.sampler._poses.active[env_index])
+    handle.visible = human_active
+
+    if self.print_velocity:
+      assert self._velocity_measurement_valid is not None
+      assert self._velocity_distance_m is not None
+      label = self._viser_velocity_label_handles.get(env_index)
+      root_w = (
+        self.sampler._poses.root_positions_w[env_index].detach().cpu().numpy()
+      )
+      body_scale_z = float(self.sampler.body_scale_xyz[env_index, 2])
+      label_position = root_w + scene_offset + np.array(
+        (0.0, 0.0, 1.15 * body_scale_z), dtype=np.float32
+      )
+      label_text = self._velocity_label_text(env_index)
+      if label is None:
+        label = visualizer.server.scene.add_label(
+          f"/safe_mimic/human_velocity/env_{env_index}",
+          label_text,
+          position=label_position,
+          font_size_mode="screen",
+          font_screen_scale=0.85,
+          depth_test=False,
+          anchor="bottom-center",
+        )
+        self._viser_velocity_label_handles[env_index] = label
+      else:
+        label.text = label_text
+        label.position = label_position
+      label.visible = human_active and bool(
+        self._velocity_measurement_valid[env_index]
+      )

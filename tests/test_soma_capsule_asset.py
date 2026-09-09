@@ -46,6 +46,7 @@ def test_soma_capsule_crowd_has_independent_mocap_geometries() -> None:
 
   assert len(SOMA_CROWD_PROXY_SPECS) == 5
   assert SOMA_CROWD_PROXY_SPECS[0].name == "body_head"
+  assert SOMA_CROWD_PROXY_SPECS[0].radius_m == 0.165
 
 
 def test_ray_only_crowd_remains_lidar_visible_without_contacts() -> None:
@@ -72,6 +73,17 @@ def test_soma_proxy_has_18_independent_lidar_visible_mocap_capsules() -> None:
     model.geom("human_capsule_geom_left_forearm").type[0]
     == mujoco.mjtGeom.mjGEOM_CAPSULE
   )
+
+
+def test_ray_only_primary_human_remains_lidar_visible_without_contacts() -> None:
+  model = get_soma_capsule_human_spec(collidable=False).compile()
+
+  assert model.nmocap == 1
+  assert model.nbody == 2
+  assert model.ngeom == len(SOMA_CAPSULE_SPECS)
+  assert np.all(model.geom_group == HUMAN_RAYCAST_GROUP)
+  assert np.all(model.geom_contype == 0)
+  assert np.all(model.geom_conaffinity == 0)
 
 
 def test_every_capsule_follows_its_mocap_pose() -> None:

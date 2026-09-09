@@ -161,12 +161,16 @@ class HeldScanRayCastSensor(RayCastSensor):
     self._accum_normals_w: torch.Tensor | None = None
     self._accum_hit_pos_w: torch.Tensor | None = None
     self._published_distances: torch.Tensor | None = None
+    self._previous_published_distances: torch.Tensor | None = None
     self._published_normals_w: torch.Tensor | None = None
     self._published_hit_pos_w: torch.Tensor | None = None
     self._published_pos_w: torch.Tensor | None = None
     self._published_quat_w: torch.Tensor | None = None
     self._published_frame_pos_w: torch.Tensor | None = None
     self._published_frame_quat_w: torch.Tensor | None = None
+    self._published_scan_age_steps: torch.Tensor | None = None
+    self._publication_count: torch.Tensor | None = None
+    self._global_publication_count = 0
 
   @property
   def output_num_rays(self) -> int:
@@ -177,6 +181,32 @@ class HeldScanRayCastSensor(RayCastSensor):
   def rays_per_update(self) -> int:
     """Number of rays evaluated on each 50 Hz environment step."""
     return self.cfg.pattern.rays_per_phase
+
+  @property
+  def previous_distances(self) -> torch.Tensor:
+    """Ranges from the completed scan immediately before ``data.distances``."""
+    if self._previous_published_distances is None:
+      raise RuntimeError("sensor has not been initialized")
+    return self._previous_published_distances
+
+  @property
+  def published_scan_age_steps(self) -> torch.Tensor:
+    """Number of sensor updates since the latest complete scan publication."""
+    if self._published_scan_age_steps is None:
+      raise RuntimeError("sensor has not been initialized")
+    return self._published_scan_age_steps
+
+  @property
+  def publication_count(self) -> torch.Tensor:
+    """Per-environment complete-scan publication count since reset."""
+    if self._publication_count is None:
+      raise RuntimeError("sensor has not been initialized")
+    return self._publication_count
+
+  @property
+  def global_publication_count(self) -> int:
+    """Host-side generation for synchronously published complete scans."""
+    return self._global_publication_count
 
   def initialize(
     self,
@@ -221,6 +251,7 @@ class HeldScanRayCastSensor(RayCastSensor):
       batch_size, full_rays, 3, device=device
     )
     self._published_distances = self._accum_distances.clone()
+    self._previous_published_distances = self._accum_distances.clone()
     self._published_normals_w = self._accum_normals_w.clone()
     self._published_hit_pos_w = self._accum_hit_pos_w.clone()
     self._published_pos_w = torch.zeros(batch_size, 3, device=device)
@@ -233,6 +264,12 @@ class HeldScanRayCastSensor(RayCastSensor):
       batch_size, frames, 4, device=device
     )
     self._published_frame_quat_w[..., 0] = 1.0
+    self._published_scan_age_steps = torch.full(
+      (batch_size,), pattern.phases, device=device, dtype=torch.long
+    )
+    self._publication_count = torch.zeros(
+      batch_size, device=device, dtype=torch.long
+    )
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     super().reset(env_ids)
@@ -242,14 +279,18 @@ class HeldScanRayCastSensor(RayCastSensor):
     assert self._accum_distances is not None
     assert self._accum_normals_w is not None and self._accum_hit_pos_w is not None
     assert self._published_normals_w is not None
+    assert self._previous_published_distances is not None
     assert self._published_hit_pos_w is not None
     assert self._published_pos_w is not None and self._published_quat_w is not None
     assert self._published_frame_pos_w is not None
     assert self._published_frame_quat_w is not None
+    assert self._published_scan_age_steps is not None
+    assert self._publication_count is not None
     self._accum_distances[ids] = -1.0
     self._accum_normals_w[ids] = 0.0
     self._accum_hit_pos_w[ids] = 0.0
     self._published_distances[ids] = -1.0
+    self._previous_published_distances[ids] = -1.0
     self._published_normals_w[ids] = 0.0
     self._published_hit_pos_w[ids] = 0.0
     self._published_pos_w[ids] = 0.0
@@ -258,6 +299,8 @@ class HeldScanRayCastSensor(RayCastSensor):
     self._published_frame_pos_w[ids] = 0.0
     self._published_frame_quat_w[ids] = 0.0
     self._published_frame_quat_w[ids, :, 0] = 1.0
+    self._published_scan_age_steps[ids] = self.cfg.pattern.phases
+    self._publication_count[ids] = 0
 
   def update(self, dt: float) -> None:
     # Deliberately do not invalidate the published cache each physics substep:
@@ -287,6 +330,8 @@ class HeldScanRayCastSensor(RayCastSensor):
     )
     assert self._accum_distances is not None
     assert self._accum_normals_w is not None and self._accum_hit_pos_w is not None
+    assert self._published_scan_age_steps is not None
+    self._published_scan_age_steps.add_(1)
     indices = self._phase_indices[self._phase]
     source_indices = self._phase_source_indices[self._phase]
     self._accum_distances.index_copy_(
@@ -302,12 +347,15 @@ class HeldScanRayCastSensor(RayCastSensor):
     if self._phase == self.cfg.pattern.phases - 1:
       assert self._published_distances is not None
       assert self._published_normals_w is not None
+      assert self._previous_published_distances is not None
       assert self._published_hit_pos_w is not None
       assert self._published_pos_w is not None and self._published_quat_w is not None
       assert self._published_frame_pos_w is not None
       assert self._published_frame_quat_w is not None
       assert self._pos_w is not None and self._quat_w is not None
       assert self._frame_pos_w is not None and self._frame_quat_w is not None
+      assert self._publication_count is not None
+      self._previous_published_distances.copy_(self._published_distances)
       self._published_distances.copy_(self._accum_distances)
       self._published_normals_w.copy_(self._accum_normals_w)
       self._published_hit_pos_w.copy_(self._accum_hit_pos_w)
@@ -315,6 +363,9 @@ class HeldScanRayCastSensor(RayCastSensor):
       self._published_quat_w.copy_(self._quat_w)
       self._published_frame_pos_w.copy_(self._frame_pos_w)
       self._published_frame_quat_w.copy_(self._frame_quat_w)
+      self._published_scan_age_steps.zero_()
+      self._publication_count.add_(1)
+      self._global_publication_count += 1
       self._invalidate_cache()
 
   def _compute_data(self) -> RayCastData:
