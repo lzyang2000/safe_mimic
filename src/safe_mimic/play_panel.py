@@ -6,8 +6,10 @@ Safe Mimic controls on top of it without touching the dependency.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
+import torch
 from mjlab.viewer import ViserPlayViewer
 from typing_extensions import override
 
@@ -57,6 +59,39 @@ def add_human_speed_limit_checkbox(
   return checkbox
 
 
+def install_termination_printer(
+  env: Any, raw_env: Any, log: Callable[[str], None] = print
+) -> None:
+  """Wrap ``env.step`` so every episode end prints its cause and duration.
+
+  Works for any viewer (native or viser) because both call ``env.step``.
+  The cause is read from the raw env's termination manager right after the
+  step; mjlab keeps the per-term flags until the next ``compute``.
+  """
+  inner_step = env.step
+  clock: torch.Tensor | None = None
+
+  def step(actions: Any) -> tuple[Any, ...]:
+    nonlocal clock
+    result = inner_step(actions)
+    dones = torch.as_tensor(result[2]).reshape(-1).bool()
+    if clock is None:
+      clock = torch.zeros(dones.shape[0], dtype=torch.float64)
+    clock += float(raw_env.step_dt)
+    if bool(dones.any()):
+      manager = raw_env.termination_manager
+      for env_idx in torch.nonzero(dones).flatten().tolist():
+        causes = [
+          name for name in manager.active_terms if bool(manager.get_term(name)[env_idx])
+        ]
+        cause = ", ".join(causes) or "reset (no active termination term)"
+        log(f"[TERM] env {env_idx} ended after {float(clock[env_idx]):.2f} s: {cause}")
+        clock[env_idx] = 0.0
+    return result
+
+  env.step = step
+
+
 class SafeMimicPlayViewer(ViserPlayViewer):
   """Play viewer whose panel carries the Safe Mimic human-speed control."""
 
@@ -73,6 +108,7 @@ class SafeMimicPlayViewer(ViserPlayViewer):
 
 __all__ = [
   "HUMAN_SPEED_LIMIT_HINT",
+  "install_termination_printer",
   "HUMAN_SPEED_LIMIT_LABEL",
   "SafeMimicPlayViewer",
   "add_human_speed_limit_checkbox",

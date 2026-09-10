@@ -23,7 +23,7 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.viewer import NativeMujocoViewer
 
 from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset
-from safe_mimic.play_panel import SafeMimicPlayViewer
+from safe_mimic.play_panel import SafeMimicPlayViewer, install_termination_printer
 from safe_mimic.rl.perceptive_lidar import PerceptiveLidarActor
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_FKC2_TASK_ID,
@@ -41,6 +41,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_TASK_ID,
 )
+from safe_mimic.tasks.env_cfg import PRIMARY_HUMAN_EVENT_NAME
 from safe_mimic.tasks.kinematic_replay_command import PlanarFilteredReplayMotionCommand
 
 DEFAULT_MOTION = Path("artifacts/motions/lafan1_dance1_subject1_demo_motion.npz")
@@ -109,7 +110,23 @@ def _parse_args() -> argparse.Namespace:
     "evaluation presets' encounters (slow: spawn >= 1.8 m, approach <= 0.75 m/s). "
     "The episode stays effectively infinite in play either way.",
   )
-  parser.add_argument("--no-terminations", action="store_true")
+  parser.add_argument(
+    "--no-terminations",
+    action="store_true",
+    help="drop every termination (episodes never end)",
+  )
+  parser.add_argument(
+    "--no-tracking-termination",
+    action="store_true",
+    help="drop only ee_body_pos (wrist/ankle height vs the corrected reference); "
+    "collisions and falls still end the episode",
+  )
+  parser.add_argument(
+    "--print-human-velocity",
+    action="store_true",
+    help="also print the periodic [primary-human] velocity lines (off: only "
+    "[TERM] episode-end lines are printed while running)",
+  )
   return parser.parse_args()
 
 
@@ -124,6 +141,13 @@ def main() -> None:
     apply_encounter_preset(cfg, args.encounter_preset, keep_episode_length=True)
   if args.no_terminations:
     cfg.terminations = {}
+  elif args.no_tracking_termination:
+    cfg.terminations.pop("ee_body_pos", None)
+  # The play cfg turns on the walking human's periodic velocity print together
+  # with its mesh; keep the run-time console to the [TERM] lines by default.
+  cfg.events[PRIMARY_HUMAN_EVENT_NAME].params["print_velocity"] = bool(
+    args.print_human_velocity
+  )
   agent_cfg = load_rl_cfg(args.task_id)
 
   raw_env = ManagerBasedRlEnv(cfg=cfg, device=args.device)
@@ -157,6 +181,11 @@ def main() -> None:
     f"[INFO] ghost mode: {args.ghost} (blue = adjuster command, "
     "green = privileged teacher reference)"
   )
+
+  if not args.no_terminations:
+    # Print why each episode ended (collision, wrist trip, fall, ...) with the
+    # time since that env's last reset; works for both viewers.
+    install_termination_printer(env, raw_env)
 
   resolved = args.viewer
   if resolved == "auto":

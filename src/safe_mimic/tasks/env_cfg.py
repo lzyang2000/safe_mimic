@@ -155,10 +155,16 @@ DEFAULT_G1_MOTION_LIBRARY_MANIFEST = (
   _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_wbc70_dance30_paired_10g_v1/"
   "conversion_manifest.jsonl"
 )
-# G1-retargeted ballet library (348 clips, 1.4-17 s, median 6 s). Used whole
-# (every split) as the reference for the Leash-Slow-Dense-Ballet task; clips
-# shorter than the episode chain into a fresh clip when they end.
+# G1-retargeted ballet library (348 clips, median 6 s). Used whole (every
+# split) as the reference for the Ballet tasks; clips shorter than the episode
+# chain into a fresh clip when they end. Since 2026-09-09 the STANCE-TRIMMED
+# copy is the default: at most ~1 s of standing kept before the first and after
+# the last active frame of each clip (scripts/trim_motion_stance.py, 2212 s ->
+# 1942 s). The untrimmed original stays at g1_ballet_v1/ballet.yaml.
 DEFAULT_G1_BALLET_MANIFEST = (
+  _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_ballet_v1_trim1s/ballet.yaml"
+)
+UNTRIMMED_G1_BALLET_MANIFEST = (
   _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_ballet_v1/ballet.yaml"
 )
 DEFAULT_EXAMPLE_DANCE_MOTION_FILE = (
@@ -317,7 +323,9 @@ def _human_motion_event_cfg(*, show_mesh: bool = False) -> EventTermCfg:
   )
 
 
-def _primary_human_motion_event_cfg(*, show_mesh: bool) -> EventTermCfg:
+def _primary_human_motion_event_cfg(
+  *, show_mesh: bool, print_velocity: bool = False
+) -> EventTermCfg:
   return EventTermCfg(
     func=HumanCapsuleMotion,
     mode="step",
@@ -335,7 +343,9 @@ def _primary_human_motion_event_cfg(*, show_mesh: bool) -> EventTermCfg:
       "min_human_height_m": 1.3,
       "max_human_height_m": 1.9,
       "show_mesh": show_mesh,
-      "print_velocity": show_mesh,
+      # Console velocity diagnostic: only the full-scene demo tasks ask for
+      # it; play of the avoidance tasks prints just the episode-end reasons.
+      "print_velocity": print_velocity,
       "velocity_print_interval_s": 0.5,
       "mesh_skin_path": DEFAULT_SOMA_MESH_SKIN_PATH,
     },
@@ -353,7 +363,9 @@ def _full_scene_demo_event_cfgs(
   # The SOMA skin's apparent forward axis is 90 degrees counterclockwise from
   # the placement convention used by the sampler.
   crowd_event.params["facing_yaw_offset_rad"] = -1.5707963267948966
-  return crowd_event, _primary_human_motion_event_cfg(show_mesh=show_mesh)
+  return crowd_event, _primary_human_motion_event_cfg(
+    show_mesh=show_mesh, print_velocity=show_mesh
+  )
 
 
 def _primary_human_contact_cfg() -> ContactSensorCfg:
