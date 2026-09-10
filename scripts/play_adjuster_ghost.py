@@ -22,7 +22,11 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.viewer import NativeMujocoViewer
 
-from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset
+from safe_mimic.evaluation import (
+  ENCOUNTER_PRESETS,
+  apply_encounter_preset,
+  retarget_escape_moves,
+)
 from safe_mimic.play_panel import (
   SafeMimicPlayViewer,
   install_actor_escape_hint,
@@ -146,6 +150,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
   args = _parse_args()
   cfg = load_env_cfg(args.task_id, play=True)
+  retarget_escape_moves(cfg, args.motion_file)
   cfg.commands["motion"].motion_file = str(args.motion_file)
   cfg.scene.num_envs = args.num_envs
   if args.encounter_preset != "task":

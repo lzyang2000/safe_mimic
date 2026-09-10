@@ -26,6 +26,7 @@ from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 from tensordict import TensorDict
 
+from safe_mimic.evaluation import retarget_escape_moves
 from safe_mimic.rl import PerceptiveLidarActor
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_AVOIDANCE_TASK_ID,
@@ -348,6 +349,7 @@ def _build_cfg(
   lidar_term = cfg.observations["lidar"].terms[lidar_term_name]
   lidar_term.params["noise_cfg"] = None
   if motion_file is not None:
+    retarget_escape_moves(cfg, motion_file)
     cfg.commands["motion"].motion_file = str(motion_file)
   _configure_scenario(cfg, scenario)
   link_filter = cfg.commands["motion"].link_filter

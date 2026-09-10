@@ -29,7 +29,12 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer.viser.overlays import ViserDebugOverlays
 from mjlab.viewer.viser.scene import MjlabViserScene
 
-from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset, bearing_deg
+from safe_mimic.evaluation import (
+  ENCOUNTER_PRESETS,
+  apply_encounter_preset,
+  bearing_deg,
+  retarget_escape_moves,
+)
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
@@ -61,6 +66,7 @@ def build(
   args: argparse.Namespace, *, checkpoint: Path, task_id: str
 ) -> tuple[Any, Any, Any]:
   cfg = load_env_cfg(task_id, play=True)
+  retarget_escape_moves(cfg, args.motion_file)
   cfg.commands["motion"].motion_file = str(args.motion_file)
   cfg.commands["motion"].sampling_mode = "start"
   cfg.seed = args.seed

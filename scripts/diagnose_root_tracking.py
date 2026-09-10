@@ -13,7 +13,11 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
-from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset
+from safe_mimic.evaluation import (
+  ENCOUNTER_PRESETS,
+  apply_encounter_preset,
+  retarget_escape_moves,
+)
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
@@ -112,6 +116,7 @@ cfg.commands["motion"].sampling_mode = "start"
 cfg.seed = a.seed
 cfg.scene.num_envs = a.num_envs
 cfg.episode_length_s = 6.0
+retarget_escape_moves(cfg, a.motion_file)
 cfg.commands["motion"].motion_file = str(a.motion_file)
 cfg.events.pop("push_robot", None)
 ce = cfg.events[HUMAN_MOTION_EVENT_NAME]

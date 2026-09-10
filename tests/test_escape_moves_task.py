@@ -85,3 +85,26 @@ def test_every_eval_script_accepts_the_moves_task() -> None:
     '"coadjust-unified-joint-leash-ballet-moves"'
     in Path("scripts/benchmark_policy_avoidance.py").read_text()
   )
+
+
+def test_retarget_escape_moves_disables_them_off_their_library(tmp_path) -> None:
+  from mjlab.tasks.registry import load_env_cfg
+
+  from safe_mimic.evaluation import retarget_escape_moves
+  from safe_mimic.tasks import (
+    LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
+    LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
+  )
+
+  cfg = load_env_cfg(
+    LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID, play=True
+  )
+  own = cfg.commands["motion"].motion_file
+  assert retarget_escape_moves(cfg, own) is True
+  assert cfg.commands["motion"].escape_moves is not None
+  assert retarget_escape_moves(cfg, tmp_path / "dance.npz") is False
+  assert cfg.commands["motion"].escape_moves is None
+  plain = load_env_cfg(
+    LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID, play=True
+  )
+  assert retarget_escape_moves(plain, tmp_path / "dance.npz") is False

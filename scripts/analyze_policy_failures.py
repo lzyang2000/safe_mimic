@@ -22,7 +22,11 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
-from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset
+from safe_mimic.evaluation import (
+  ENCOUNTER_PRESETS,
+  apply_encounter_preset,
+  retarget_escape_moves,
+)
 from safe_mimic.sensing.held_scan import HeldScanRayCastSensor
 from safe_mimic.sensing.observations import _directional_minimum_pool
 from safe_mimic.tasks import (
@@ -287,6 +291,7 @@ def _configure_env(
   cfg.seed = seed
   cfg.scene.num_envs = num_envs
   cfg.episode_length_s = 10.0
+  retarget_escape_moves(cfg, motion_file)
   cfg.commands["motion"].motion_file = str(motion_file)
   cfg.events.pop("push_robot", None)
   cfg.events[PRIMARY_HUMAN_EVENT_NAME].params["encounter_sampling"] = "independent"

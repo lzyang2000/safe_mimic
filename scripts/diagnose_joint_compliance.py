@@ -32,7 +32,11 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
-from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset
+from safe_mimic.evaluation import (
+  ENCOUNTER_PRESETS,
+  apply_encounter_preset,
+  retarget_escape_moves,
+)
 from safe_mimic.rl import PerceptiveLidarActor
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_AVOIDANCE_TASK_ID,
@@ -303,6 +307,7 @@ def main() -> None:
   cfg.seed = args.seed
   cfg.scene.num_envs = args.num_envs
   cfg.episode_length_s = 6.0
+  retarget_escape_moves(cfg, args.motion_file)
   cfg.commands["motion"].motion_file = str(args.motion_file)
   if args.expose_filtered_command:
     # Feed the actor the privileged CBF-filtered reference instead of raw.

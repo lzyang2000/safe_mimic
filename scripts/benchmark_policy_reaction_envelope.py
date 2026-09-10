@@ -23,6 +23,7 @@ from safe_mimic.evaluation import (
   bearing_deg,
   fair_regime_by_region,
   fair_regime_summary,
+  retarget_escape_moves,
 )
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_AVOIDANCE_TASK_ID,
@@ -370,6 +371,7 @@ def main() -> None:
   cfg.seed = args.seed
   cfg.scene.num_envs = args.num_envs
   cfg.episode_length_s = args.episode_length_s
+  retarget_escape_moves(cfg, args.motion_file)
   cfg.commands["motion"].motion_file = str(args.motion_file)
   if args.expose_filtered_command:
     # Feed the actor the privileged CBF-filtered reference instead of raw.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -16,6 +17,26 @@ from safe_mimic.tasks.env_cfg import (
 )
 
 _COLLISION_CAUSES = ("primary_human_collision", "crowd_collision")
+
+
+def retarget_escape_moves(cfg: Any, motion_file: str | Path) -> bool:
+  """Keep escape moves only when ``motion_file`` is the library they index.
+
+  The escape-move planner needs the clip library its travel index was built
+  for; evaluating a Moves checkpoint on another reference (the dance clip, the
+  untrimmed library) would otherwise fail at construction. Call BEFORE
+  overriding ``cfg.commands["motion"].motion_file``. Returns True when the
+  moves stay enabled, False when they were switched off (the policy then runs
+  as a plain tracker on that reference: the "moves off" ablation).
+  """
+  motion = cfg.commands["motion"]
+  if getattr(motion, "escape_moves", None) is None:
+    return False
+  if Path(motion_file).expanduser().resolve() == Path(motion.motion_file).resolve():
+    return True
+  motion.escape_moves = None
+  return False
+
 
 # Evaluation encounter presets. "standard" is the frozen envelope every gate
 # since Phase 2 used (spawn 0.75-4 m, intercept 0.5-4 s, independent draws,
