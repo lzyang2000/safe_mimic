@@ -25,8 +25,13 @@ class EscapeMoveCfg:
   index_file: str
   """Travel index JSON (``build_escape_move_index.py``) for the manifest."""
 
-  trigger_speed_mps: float = 0.25
-  """Planar trigger norm at or above which a step counts towards a switch."""
+  trigger_speed_mps: float = 0.4
+  """Planar trigger norm at or above which a step counts towards a switch.
+
+  0.4 m/s (was 0.25 in the first smoke): the lower value fired on 42 % of
+  env-steps next to the dense crowd ring, so moves were not reserved for real
+  threats (2026-09-10 smoke with ballet@30k driving).
+  """
 
   trigger_steps: int = 3
   """Consecutive triggering steps before a move is entered."""

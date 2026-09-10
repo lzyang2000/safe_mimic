@@ -19,7 +19,7 @@ from safe_mimic.tasks.escape_moves import (
 
 def test_cfg_defaults_and_validation() -> None:
   cfg = EscapeMoveCfg(index_file="x.json")
-  assert (cfg.trigger_speed_mps, cfg.trigger_steps, cfg.min_alignment) == (0.25, 3, 0.7)
+  assert (cfg.trigger_speed_mps, cfg.trigger_steps, cfg.min_alignment) == (0.4, 3, 0.7)
   assert (cfg.speed_cap_mps, cfg.pose_distance_weight) == (1.0, 0.5)
   assert (cfg.blend_s, cfg.cooldown_s, cfg.trigger_source) == (0.3, 1.0, "teacher")
   with pytest.raises(ValueError, match="trigger_source"):
