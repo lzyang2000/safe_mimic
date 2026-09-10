@@ -51,6 +51,7 @@ from safe_mimic.sensing.observations import (
   normalized_lidar_ranges,
 )
 from safe_mimic.tasks import mdp
+from safe_mimic.tasks.escape_moves import EscapeMoveCfg
 from safe_mimic.tasks.human_capsule_event import HumanCapsuleMotion
 from safe_mimic.tasks.human_crowd_event import HumanCapsuleCrowdMotion
 from safe_mimic.tasks.kinematic_replay_command import (
@@ -166,6 +167,16 @@ DEFAULT_G1_BALLET_MANIFEST = (
 )
 UNTRIMMED_G1_BALLET_MANIFEST = (
   _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_ballet_v1/ballet.yaml"
+)
+# Left/right MIRRORED copy of the trimmed library (696 clips,
+# scripts/mirror_g1_motion_library.py) plus its travel-phase index
+# (scripts/build_escape_move_index.py): the escape-move tasks draw travelling
+# steps from it in every body-frame direction.
+DEFAULT_G1_BALLET_MIRROR_MANIFEST = (
+  _PROJECT_ROOT / "artifacts/bones-seed/datasets/g1_ballet_v1_trim1s_mirror/ballet.yaml"
+)
+DEFAULT_G1_BALLET_ESCAPE_INDEX = DEFAULT_G1_BALLET_MIRROR_MANIFEST.with_name(
+  "escape_moves.json"
 )
 DEFAULT_EXAMPLE_DANCE_MOTION_FILE = (
   _PROJECT_ROOT / "artifacts/motions/lafan1_dance1_subject1_demo_motion.npz"
@@ -971,6 +982,7 @@ def unitree_g1_lidar_unified_reference_tracking_env_cfg(
   blind_actor: bool = False,
   nominal_reference: bool = False,
   training_humans: bool = True,
+  escape_moves: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """Nominal tracking rewards on one fully filtered reference.
 
@@ -1022,6 +1034,12 @@ def unitree_g1_lidar_unified_reference_tracking_env_cfg(
   stay parked below the floor and never touch training; the play cfg keeps
   them so evaluation happens in the populated scene. Scene entities and the
   critic's privileged terms are untouched so network shapes match.
+  ``escape_moves`` (requires ``motion_manifest``) lets the reference generator
+  answer a sustained planar CBF correction by switching the RAW clip to a
+  travelling ballet move aligned with the escape direction and resuming the
+  interrupted clip afterwards (``EscapeMoveCfg`` defaults; the travel index is
+  ``escape_moves.json`` next to the manifest). Rewards, observations and
+  terminations are untouched; the CBF filters stay on top.
   """
   if dense_encounters and not slow_regime:
     raise ValueError("dense_encounters requires slow_regime=True")
@@ -1043,6 +1061,12 @@ def unitree_g1_lidar_unified_reference_tracking_env_cfg(
   if motion_manifest is not None:
     motion.motion_file = str(motion_manifest)
     motion.manifest_splits = None
+  if escape_moves:
+    if motion_manifest is None:
+      raise ValueError("escape_moves requires a clip-library motion_manifest")
+    motion.escape_moves = EscapeMoveCfg(
+      index_file=str(Path(motion_manifest).with_name("escape_moves.json"))
+    )
   if blind_actor:
     # No-perception baseline: the actor's LiDAR term reads "no returns" at
     # every step (same shape/params, so the network is identical); the critic

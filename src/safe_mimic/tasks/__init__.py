@@ -18,6 +18,7 @@ from safe_mimic.rl import (
 )
 from safe_mimic.tasks.env_cfg import (
   DEFAULT_G1_BALLET_MANIFEST,
+  DEFAULT_G1_BALLET_MIRROR_MANIFEST,
   unitree_g1_crowd_and_human_tracking_env_cfg,
   unitree_g1_example_dance_implicit_state_tracking_env_cfg,
   unitree_g1_example_dance_tracking_env_cfg,
@@ -100,6 +101,9 @@ LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID = (
 )
 LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID = (
   "SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar-Auxiliary-CoAdjust-Unified-Joint-Leash-Ballet-Blind-NoHumans"
+)
+LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID = (
+  "SafeMimic-Tracking-LiveAligned-Crowd-Human-Unitree-G1-Lidar-Auxiliary-CoAdjust-Unified-Joint-Leash-Ballet-Moves"
 )
 UNIFIED_ROOT_LEAD_M = 0.3
 SPARSE_LIDAR_AVOIDANCE_TASK_ID = (
@@ -969,6 +973,53 @@ register_mjlab_task(
   runner_cls=MotionTrackingOnPolicyRunner,
 )
 
+# ESCAPE MOVES (user, 2026-09-10): Leash-Ballet on the left/right mirrored
+# library; a sustained planar CBF correction switches the RAW clip to a
+# travelling ballet step aligned with the escape direction, then resumes the
+# interrupted clip. Same network, rewards, terminations and rl cfg.
+lidar_auxiliary_coadjust_unified_joint_leash_ballet_moves_rl_cfg = (
+  _perceptive_lidar_runner_cfg(
+    auxiliary_supervision=True,
+    experiment_name=(
+      "safe_mimic_g1_live_aligned_lidar_avoidance_auxiliary_coadjust_unified_joint_leash_ballet_moves"
+    ),
+  )
+)
+_unified_bmoves_actor = (
+  lidar_auxiliary_coadjust_unified_joint_leash_ballet_moves_rl_cfg.actor
+)
+_unified_bmoves_actor.adjust_command_with_joint_prediction = True
+_unified_bmoves_actor.command_joint_pos_offset = 0
+_unified_bmoves_actor.avoidance_joint_action_residual_gain = 0.0
+del _unified_bmoves_actor
+_unified_bmoves_algorithm = (
+  lidar_auxiliary_coadjust_unified_joint_leash_ballet_moves_rl_cfg.algorithm
+)
+_unified_bmoves_algorithm.avoidance_teacher_mix_start = 1.0
+_unified_bmoves_algorithm.avoidance_teacher_mix_end = 0.0
+_unified_bmoves_algorithm.avoidance_teacher_mix_decay_updates = 8000
+del _unified_bmoves_algorithm
+register_mjlab_task(
+  task_id=LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
+  env_cfg=unitree_g1_lidar_unified_reference_tracking_env_cfg(
+    active_joint_reward=True,
+    root_lead_m=UNIFIED_ROOT_LEAD_M,
+    planar_filter_at_robot_root=True,
+    motion_manifest=str(DEFAULT_G1_BALLET_MIRROR_MANIFEST),
+    escape_moves=True,
+  ),
+  play_env_cfg=unitree_g1_lidar_unified_reference_tracking_env_cfg(
+    play=True,
+    active_joint_reward=True,
+    root_lead_m=UNIFIED_ROOT_LEAD_M,
+    planar_filter_at_robot_root=True,
+    motion_manifest=str(DEFAULT_G1_BALLET_MIRROR_MANIFEST),
+    escape_moves=True,
+  ),
+  rl_cfg=lidar_auxiliary_coadjust_unified_joint_leash_ballet_moves_rl_cfg,
+  runner_cls=MotionTrackingOnPolicyRunner,
+)
+
 sparse_lidar_avoidance_rl_cfg = _perceptive_lidar_runner_cfg(
   azimuth_samples=120,
   elevation_samples=4,
@@ -1033,6 +1084,7 @@ __all__ = [
   "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID",
   "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID",
   "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID",
+  "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID",
   "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID",
   "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID",
   "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID",
