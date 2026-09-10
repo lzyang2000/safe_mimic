@@ -33,6 +33,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID,
+  LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID,
@@ -46,6 +47,7 @@ from safe_mimic.tasks import (
 )
 from safe_mimic.tasks.env_cfg import (
   DEFAULT_G1_BALLET_MANIFEST,
+  DEFAULT_G1_BALLET_MIRROR_MANIFEST,
   HUMAN_MOTION_EVENT_NAME,
   LIDAR_SENSOR_NAME,
   PRIMARY_HUMAN_ENTITY_NAME,
@@ -61,6 +63,7 @@ BLIND_NOMINAL_TASK_ID = (
 BLIND_NOHUMANS_TASK_ID = (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID
 )
+MOVES_TASK_ID = LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID
 
 
 def _quaternion_z_axis(quaternion_wxyz: torch.Tensor) -> torch.Tensor:
@@ -264,6 +267,16 @@ def _configure_env(
       nominal_reference=True,
       training_humans=False,
     )
+  elif task_id == MOVES_TASK_ID:
+    # Escape moves: mirrored ballet library, travelling steps as the escape.
+    cfg = unitree_g1_lidar_unified_reference_tracking_env_cfg(
+      play=online_human,
+      active_joint_reward=True,
+      root_lead_m=UNIFIED_ROOT_LEAD_M,
+      planar_filter_at_robot_root=True,
+      motion_manifest=str(DEFAULT_G1_BALLET_MIRROR_MANIFEST),
+      escape_moves=True,
+    )
   else:
     cfg = unitree_g1_lidar_auxiliary_avoidance_tracking_env_cfg(play=online_human)
     if task_id == LIDAR_AUXILIARY_COADJUST_FKC_TASK_ID:
@@ -362,6 +375,7 @@ def main() -> None:
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID,
+      LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
     ),
     default=LIDAR_RANGE_RATE_AVOIDANCE_TASK_ID,
     help="rl-cfg/runner task id used to load the checkpoint's actor config",

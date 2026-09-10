@@ -145,8 +145,22 @@ def fair_regime_summary(
   # 25 cm wrist/ankle lag behind the reference and never involves contact.
   # ``failure_rate`` still counts both, for continuity with earlier gates.
   safety = collisions + other
+  # Escape moves (optional per-case keys from the envelope benchmark): the
+  # share of selected episodes that entered a move AND kept the planar CBF
+  # correction under the resolved threshold while it played.
+  with_escape = [c for c in selected if "escape_resolved" in c]
+  escape_resolved = sum(1 for c in with_escape if c["escape_resolved"])
+  escape_moves_mean = (
+    sum(float(c.get("escape_moves", 0.0)) for c in with_escape) / len(with_escape)
+    if with_escape
+    else math.nan
+  )
   return {
     "definition": {"max_speed_mps": max_speed_mps, "min_clearance_m": min_clearance_m},
+    "escape_resolved_rate": (
+      escape_resolved / len(with_escape) if with_escape else math.nan
+    ),
+    "escape_moves_mean": escape_moves_mean,
     "episodes": episodes,
     "collisions": collisions,
     "ee_body_pos": ee_trips,

@@ -23,7 +23,11 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.viewer import NativeMujocoViewer
 
 from safe_mimic.evaluation import ENCOUNTER_PRESETS, apply_encounter_preset
-from safe_mimic.play_panel import SafeMimicPlayViewer, install_termination_printer
+from safe_mimic.play_panel import (
+  SafeMimicPlayViewer,
+  install_actor_escape_hint,
+  install_termination_printer,
+)
 from safe_mimic.rl.perceptive_lidar import PerceptiveLidarActor
 from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_FKC2_TASK_ID,
@@ -33,6 +37,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID,
+  LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID,
@@ -89,6 +94,7 @@ def _parse_args() -> argparse.Namespace:
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID,
+      LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
     ),
   )
   parser.add_argument("--motion-file", type=Path, default=DEFAULT_MOTION)
@@ -122,6 +128,13 @@ def _parse_args() -> argparse.Namespace:
     "collisions and falls still end the episode",
   )
   parser.add_argument(
+    "--escape-trigger",
+    choices=("teacher", "actor"),
+    default="teacher",
+    help="escape-move tasks only: switch clips on the privileged CBF correction "
+    "(teacher) or on the actor's own planar prediction (actor = deployment)",
+  )
+  parser.add_argument(
     "--print-human-velocity",
     action="store_true",
     help="also print the periodic [primary-human] velocity lines (off: only "
@@ -148,6 +161,11 @@ def main() -> None:
   cfg.events[PRIMARY_HUMAN_EVENT_NAME].params["print_velocity"] = bool(
     args.print_human_velocity
   )
+  moves_cfg = cfg.commands["motion"].escape_moves
+  if args.escape_trigger == "actor":
+    if moves_cfg is None:
+      raise SystemExit("--escape-trigger actor needs an escape-moves task")
+    moves_cfg.trigger_source = "actor"
   agent_cfg = load_rl_cfg(args.task_id)
 
   raw_env = ManagerBasedRlEnv(cfg=cfg, device=args.device)
@@ -186,6 +204,9 @@ def main() -> None:
     # Print why each episode ended (collision, wrist trip, fall, ...) with the
     # time since that env's last reset; works for both viewers.
     install_termination_printer(env, raw_env)
+  if args.escape_trigger == "actor":
+    # Deployment path: the head's planar prediction drives the clip switch.
+    install_actor_escape_hint(env, command, policy)
 
   resolved = args.viewer
   if resolved == "auto":

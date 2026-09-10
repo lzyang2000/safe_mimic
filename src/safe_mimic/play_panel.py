@@ -92,6 +92,27 @@ def install_termination_printer(
   env.step = step
 
 
+def install_actor_escape_hint(env: Any, command: Any, policy: Any) -> None:
+  """Feed the actor's planar prediction to the escape-move planner each step.
+
+  Deployment path for escape moves: before every ``env.step`` the current
+  observations are run through the actor's avoidance head and the first
+  ``avoidance_planar_dim`` values (body-frame planar correction, m/s) are handed
+  to ``command.set_actor_escape_hint``. The command must have been configured
+  with ``trigger_source="actor"``.
+  """
+  inner_step = env.step
+  planar_dim = int(getattr(policy, "avoidance_planar_dim", 2))
+
+  def step(actions: Any) -> tuple[Any, ...]:
+    with torch.no_grad():
+      prediction = policy.predict_avoidance(env.get_observations())
+    command.set_actor_escape_hint(prediction[..., :planar_dim])
+    return inner_step(actions)
+
+  env.step = step
+
+
 class SafeMimicPlayViewer(ViserPlayViewer):
   """Play viewer whose panel carries the Safe Mimic human-speed control."""
 
@@ -108,6 +129,7 @@ class SafeMimicPlayViewer(ViserPlayViewer):
 
 __all__ = [
   "HUMAN_SPEED_LIMIT_HINT",
+  "install_actor_escape_hint",
   "install_termination_printer",
   "HUMAN_SPEED_LIMIT_LABEL",
   "SafeMimicPlayViewer",

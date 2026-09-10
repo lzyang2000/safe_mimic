@@ -36,6 +36,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID,
+  LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID,
@@ -52,6 +53,7 @@ from safe_mimic.tasks.env_cfg import (
   CROWD_CAPSULES_PER_PERSON,
   CROWD_PRIVILEGED_NEAREST_PEOPLE,
   DEFAULT_G1_BALLET_MANIFEST,
+  DEFAULT_G1_BALLET_MIRROR_MANIFEST,
   HUMAN_ENTITY_NAME,
   HUMAN_MOTION_EVENT_NAME,
   PRIMARY_HUMAN_ENTITY_NAME,
@@ -90,6 +92,7 @@ TaskVariant = Literal[
   "coadjust-unified-joint-leash-ballet-blind",
   "coadjust-unified-joint-leash-ballet-blind-nominal",
   "coadjust-unified-joint-leash-ballet-blind-nohumans",
+  "coadjust-unified-joint-leash-ballet-moves",
 ]
 
 _CROWD_CLEARANCE_METRIC = "benchmark_crowd_clearance"
@@ -265,6 +268,16 @@ def _build_cfg(
         training_humans=False,
       )
     ),
+    "coadjust-unified-joint-leash-ballet-moves": lambda play: (
+      unitree_g1_lidar_unified_reference_tracking_env_cfg(
+        play=play,
+        active_joint_reward=True,
+        root_lead_m=UNIFIED_ROOT_LEAD_M,
+        planar_filter_at_robot_root=True,
+        motion_manifest=str(DEFAULT_G1_BALLET_MIRROR_MANIFEST),
+        escape_moves=True,
+      )
+    ),
   }[task_variant]
   cfg = cfg_fn(play=human_runtime == "online")
   if task_variant in ("coadjust-fkc", "coadjust-fkc2"):
@@ -328,6 +341,7 @@ def _build_cfg(
       "coadjust-unified-joint-leash-ballet-blind",
       "coadjust-unified-joint-leash-ballet-blind-nominal",
       "coadjust-unified-joint-leash-ballet-blind-nohumans",
+      "coadjust-unified-joint-leash-ballet-moves",
     )
     else "directional_scan_pair"
   )
@@ -387,6 +401,7 @@ def _policy_action(
       "coadjust-unified-joint-leash-ballet-blind",
       "coadjust-unified-joint-leash-ballet-blind-nominal",
       "coadjust-unified-joint-leash-ballet-blind-nohumans",
+      "coadjust-unified-joint-leash-ballet-moves",
     ) or not isinstance(policy, PerceptiveLidarActor):
       raise ValueError(f"{mode} requires an auxiliary LiDAR checkpoint")
     if mode == "aux-zero":
@@ -419,6 +434,7 @@ def _policy_action(
       "coadjust-unified-joint-leash-ballet-blind",
       "coadjust-unified-joint-leash-ballet-blind-nominal",
       "coadjust-unified-joint-leash-ballet-blind-nohumans",
+      "coadjust-unified-joint-leash-ballet-moves",
     ):
       cell_count = directional.shape[-1] // 2
       directional[..., :cell_count] = 1.0
@@ -509,6 +525,9 @@ def _evaluate(
     ),
     "coadjust-unified-joint-leash-ballet-blind-nohumans": (
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID
+    ),
+    "coadjust-unified-joint-leash-ballet-moves": (
+      LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID
     ),
   }[task_variant]
   agent_cfg = load_rl_cfg(task_id)
@@ -711,6 +730,7 @@ def main() -> None:
       "coadjust-unified-joint-leash-ballet-blind",
       "coadjust-unified-joint-leash-ballet-blind-nominal",
       "coadjust-unified-joint-leash-ballet-blind-nohumans",
+      "coadjust-unified-joint-leash-ballet-moves",
     ),
     default="baseline",
     help="observation/reward task contract used to train the checkpoint",

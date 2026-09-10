@@ -33,6 +33,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID,
+  LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID,
@@ -45,6 +46,7 @@ from safe_mimic.tasks import (
 )
 from safe_mimic.tasks.env_cfg import (
   DEFAULT_G1_BALLET_MANIFEST,
+  DEFAULT_G1_BALLET_MIRROR_MANIFEST,
   HUMAN_MOTION_EVENT_NAME,
   PRIMARY_HUMAN_ENTITY_NAME,
   PRIMARY_HUMAN_EVENT_NAME,
@@ -58,6 +60,7 @@ BLIND_NOMINAL_TASK_ID = (
 BLIND_NOHUMANS_TASK_ID = (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID
 )
+MOVES_TASK_ID = LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID
 
 # Fair regime: encounters a ~0.6 m/s robot can physically win.
 FAIR_REGIME_MAX_SPEED_MPS = 0.75
@@ -196,6 +199,7 @@ def main() -> None:
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID,
+      LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
     ),
     default=LIDAR_AUXILIARY_AVOIDANCE_TASK_ID,
     help="rl-cfg/runner task id used to load the checkpoint's actor config",
@@ -349,6 +353,16 @@ def main() -> None:
       nominal_reference=True,
       training_humans=False,
     )
+  elif args.task_id == MOVES_TASK_ID:
+    # Escape moves: mirrored ballet library, travelling steps as the escape.
+    cfg = unitree_g1_lidar_unified_reference_tracking_env_cfg(
+      play=True,
+      active_joint_reward=True,
+      root_lead_m=UNIFIED_ROOT_LEAD_M,
+      planar_filter_at_robot_root=True,
+      motion_manifest=str(DEFAULT_G1_BALLET_MIRROR_MANIFEST),
+      escape_moves=True,
+    )
   else:
     cfg = unitree_g1_lidar_auxiliary_avoidance_tracking_env_cfg(play=True)
   # Pin frame-0 starts for comparability with existing artifacts.
@@ -474,6 +488,12 @@ def main() -> None:
   maximum_action_delta = torch.zeros(num_envs, device=args.device)
   first_outward_motion_time_s = torch.full((num_envs,), torch.nan, device=args.device)
   outward_speed_threshold_mps = 0.25
+  # Escape moves (Leash-Ballet-Moves): moves entered and the largest planar CBF
+  # correction while a move was playing. Zero / False on other tasks.
+  escape_enabled = "escape_move_count" in command.metrics
+  escape_moves = torch.zeros(num_envs, device=args.device)
+  escape_peak_intervention_mps = torch.zeros(num_envs, device=args.device)
+  escape_resolved_threshold_mps = 0.2
 
   with torch.inference_mode():
     for step in range(raw_env.max_episode_length):
@@ -499,6 +519,19 @@ def main() -> None:
       bearing_at_min_clearance_deg = torch.where(
         new_minimum, step_bearing, bearing_at_min_clearance_deg
       )
+
+      if escape_enabled:
+        escape_moves = torch.where(
+          active_before, command.metrics["escape_move_count"], escape_moves
+        )
+        escape_peak_intervention_mps = torch.where(
+          active_before,
+          torch.maximum(
+            escape_peak_intervention_mps,
+            command.metrics["escape_intervention_speed_mps"],
+          ),
+          escape_peak_intervention_mps,
+        )
 
       actions = policy(observations)
       blind_actions = _blind_action(policy, observations)
@@ -561,6 +594,9 @@ def main() -> None:
     "reaction_time_s": reaction_time_s,
     "first_outward_motion_time_s": first_outward_motion_time_s,
     "maximum_action_delta": maximum_action_delta,
+    "escape_moves": escape_moves,
+    "escape_resolved": (escape_moves > 0)
+    & (escape_peak_intervention_mps < escape_resolved_threshold_mps),
   }
   cpu = {name: tensor.cpu() for name, tensor in tensors.items()}
   collision_cpu = cpu["collision"]

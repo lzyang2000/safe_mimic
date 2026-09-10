@@ -67,3 +67,29 @@ def test_splits_safety_failures_from_tracking_terminations() -> None:
   assert s["safety_failure_rate"] == 2 / 5
   assert s["tracking_termination_rate"] == 1 / 5
   assert s["failure_rate"] == 3 / 5
+
+
+def test_escape_resolved_rate_is_nan_without_escape_keys() -> None:
+  s = fair_regime_summary(CASES, max_speed_mps=0.75, min_clearance_m=0.8)
+  import math as _math
+
+  assert _math.isnan(s["escape_resolved_rate"])
+  assert _math.isnan(s["escape_moves_mean"])
+
+
+def test_escape_resolved_rate_counts_selected_cases_only() -> None:
+  cases = [
+    dict(c, escape_moves=float(k % 2), escape_resolved=(k % 2 == 1))
+    for k, c in enumerate(CASES)
+  ]
+  s = fair_regime_summary(cases, max_speed_mps=0.75, min_clearance_m=0.8)
+  selected = [
+    c
+    for c in cases
+    if c["nominal_approach_speed_mps"] <= 0.75 and c["initial_clearance_m"] >= 0.8
+  ]
+  expected = sum(1 for c in selected if c["escape_resolved"]) / len(selected)
+  assert s["escape_resolved_rate"] == expected
+  assert s["escape_moves_mean"] == sum(c["escape_moves"] for c in selected) / len(
+    selected
+  )

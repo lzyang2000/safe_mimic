@@ -65,3 +65,23 @@ def test_moves_task_registered_for_train_and_play() -> None:
   rl = load_rl_cfg(MOVES_ID)
   assert rl.experiment_name.endswith("coadjust_unified_joint_leash_ballet_moves")
   assert rl.actor.adjust_command_with_joint_prediction is True
+
+
+def test_every_eval_script_accepts_the_moves_task() -> None:
+  for name in (
+    "benchmark_policy_reaction_envelope",
+    "diagnose_joint_compliance",
+    "analyze_policy_failures",
+    "play_adjuster_ghost",
+    "diagnose_root_tracking",
+    "record_viser_comparison",
+    "benchmark_policy_avoidance",
+  ):
+    text = Path("scripts", f"{name}.py").read_text()
+    assert (
+      "LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID" in text
+    ), name
+  assert (
+    '"coadjust-unified-joint-leash-ballet-moves"'
+    in Path("scripts/benchmark_policy_avoidance.py").read_text()
+  )

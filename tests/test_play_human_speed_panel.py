@@ -176,3 +176,41 @@ def test_avoidance_play_cfg_keeps_the_console_quiet() -> None:
   primary = cfg.events[PRIMARY_HUMAN_EVENT_NAME].params
   assert primary["show_mesh"] is True
   assert primary["print_velocity"] is False
+
+
+# --- actor escape hint (2026-09-10) -------------------------------------------
+
+from safe_mimic.play_panel import install_actor_escape_hint  # noqa: E402
+
+
+def test_actor_escape_hint_feeds_the_planar_prediction_before_each_step() -> None:
+  class Env:
+    def __init__(self) -> None:
+      self.steps: list = []
+
+    def get_observations(self):
+      return "obs"
+
+    def step(self, actions):
+      self.steps.append(actions)
+      return ("obs", "rew", torch.zeros(2), {})
+
+  class Policy:
+    avoidance_planar_dim = 2
+
+    def predict_avoidance(self, obs):
+      assert obs == "obs"
+      return torch.tensor([[0.3, -0.1, 9.0], [0.0, 0.5, 9.0]])
+
+  class Command:
+    def __init__(self) -> None:
+      self.hints: list = []
+
+    def set_actor_escape_hint(self, hint):
+      self.hints.append(hint.clone())
+
+  env, command = Env(), Command()
+  install_actor_escape_hint(env, command, Policy())
+  env.step("a")
+  assert env.steps == ["a"]
+  torch.testing.assert_close(command.hints[0], torch.tensor([[0.3, -0.1], [0.0, 0.5]]))

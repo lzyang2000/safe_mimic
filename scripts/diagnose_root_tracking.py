@@ -19,6 +19,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID,
+  LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID,
@@ -30,6 +31,7 @@ from safe_mimic.tasks import (
 )
 from safe_mimic.tasks.env_cfg import (
   DEFAULT_G1_BALLET_MANIFEST,
+  DEFAULT_G1_BALLET_MIRROR_MANIFEST,
   HUMAN_MOTION_EVENT_NAME,
   PRIMARY_HUMAN_EVENT_NAME,
   unitree_g1_lidar_unified_reference_tracking_env_cfg,
@@ -66,12 +68,16 @@ ballet_blind_nohumans = (
   a.task_id
   == LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID
 )
+ballet_moves = (
+  a.task_id == LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID
+)
 ballet = (
   ballet_slow
   or ballet_lag
   or ballet_blind
   or ballet_blind_nominal
   or ballet_blind_nohumans
+  or ballet_moves
   or a.task_id == LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID
 )
 dense = a.task_id == LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID
@@ -92,7 +98,14 @@ cfg = unitree_g1_lidar_unified_reference_tracking_env_cfg(
   dense_encounters=dense,
   lag_aware_ee_termination=ballet_lag,
   blind_actor=ballet_blind,
-  motion_manifest=str(DEFAULT_G1_BALLET_MANIFEST) if ballet else None,
+  motion_manifest=(
+    str(DEFAULT_G1_BALLET_MIRROR_MANIFEST)
+    if ballet_moves
+    else str(DEFAULT_G1_BALLET_MANIFEST)
+    if ballet
+    else None
+  ),
+  escape_moves=ballet_moves,
   filter_gated_ee_termination=slow and not dense,
 )
 cfg.commands["motion"].sampling_mode = "start"

@@ -43,6 +43,7 @@ from safe_mimic.tasks import (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_LAG_TASK_ID,
+  LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_SLOW_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_TASK_ID,
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_SLOW_DENSE_TASK_ID,
@@ -55,6 +56,7 @@ from safe_mimic.tasks import (
 )
 from safe_mimic.tasks.env_cfg import (
   DEFAULT_G1_BALLET_MANIFEST,
+  DEFAULT_G1_BALLET_MIRROR_MANIFEST,
   HUMAN_MOTION_EVENT_NAME,
   PRIMARY_HUMAN_ENTITY_NAME,
   PRIMARY_HUMAN_EVENT_NAME,
@@ -68,6 +70,7 @@ BLIND_NOMINAL_TASK_ID = (
 BLIND_NOHUMANS_TASK_ID = (
   LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID
 )
+MOVES_TASK_ID = LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID
 
 SIDES = ("left", "right")
 ARM_JOINT_TOKENS = ("shoulder", "elbow", "wrist")
@@ -116,6 +119,7 @@ def main() -> None:
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOMINAL_TASK_ID,
       LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_BLIND_NOHUMANS_TASK_ID,
+      LIDAR_AUXILIARY_COADJUST_UNIFIED_JOINT_LEASH_BALLET_MOVES_TASK_ID,
     ),
     default=LIDAR_AUXILIARY_AVOIDANCE_TASK_ID,
     help="rl-cfg/runner task id used to load the checkpoint's actor config",
@@ -281,6 +285,16 @@ def main() -> None:
       blind_actor=True,
       nominal_reference=True,
       training_humans=False,
+    )
+  elif args.task_id == MOVES_TASK_ID:
+    # Escape moves: mirrored ballet library, travelling steps as the escape.
+    cfg = unitree_g1_lidar_unified_reference_tracking_env_cfg(
+      play=True,
+      active_joint_reward=True,
+      root_lead_m=UNIFIED_ROOT_LEAD_M,
+      planar_filter_at_robot_root=True,
+      motion_manifest=str(DEFAULT_G1_BALLET_MIRROR_MANIFEST),
+      escape_moves=True,
     )
   else:
     cfg = unitree_g1_lidar_auxiliary_avoidance_tracking_env_cfg(play=True)
