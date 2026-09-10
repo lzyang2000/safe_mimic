@@ -18,9 +18,19 @@ from mjlab.utils.lab_api.math import (
   yaw_quat,
 )
 
+from safe_mimic.motions.escape_move_index import load_escape_move_index
 from safe_mimic.motions.packed_npz_motion_lib import (
   PackedNpzMotionLib,
   load_packed_npz_manifest,
+)
+from safe_mimic.tasks.escape_moves import (
+  EscapeMoveCfg,
+  EscapeMoveTable,
+  blend_alpha,
+  body_frame_planar,
+  nlerp,
+  select_escape_moves,
+  update_trigger_count,
 )
 from safe_mimic.tasks.reference_filter import (
   LinkCbfReferenceFilterCfg,
@@ -165,6 +175,11 @@ class LibraryMotionLoader:
 
   def num_clips(self) -> int:
     return int(self._library.num_motions())
+
+  @property
+  def source_paths(self) -> tuple[Path, ...]:
+    """Resolved NPZ path of every clip, in clip-id order."""
+    return tuple(source.path for source in self._library.sources)
 
   def sample_clips(self, count: int) -> torch.Tensor:
     """Sample clip ids with replacement according to manifest weights."""
@@ -567,6 +582,8 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
     self.metrics["joint_filter_reference_residual_rad"] = torch.zeros(
       self.num_envs, device=self.device
     )
+    if cfg.escape_moves is not None:
+      self._init_escape_moves(self._build_escape_table(cfg.escape_moves))
 
   def _motion_body_pos_w(self) -> torch.Tensor:
     return MotionCommand.body_pos_w.fget(self)  # type: ignore[union-attr]
@@ -595,7 +612,7 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
     self._reference_alignment_yaw_w[env_ids] = yaw_delta_w
     self._reference_alignment_root_xy_w[env_ids] = root_xy_w
 
-  def _raw_body_pos_w(self) -> torch.Tensor:
+  def _frame_body_pos_w(self) -> torch.Tensor:
     raw = self._motion_body_pos_w()
     if not self.cfg.align_reference_to_robot_each_step:
       return raw
@@ -607,32 +624,236 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
       self._reference_alignment_yaw_w,
     )
 
-  def _raw_body_quat_w(self) -> torch.Tensor:
+  def _frame_body_quat_w(self) -> torch.Tensor:
     raw = self._motion_body_quat_w()
     if not self.cfg.align_reference_to_robot_each_step:
       return raw
     yaw = self._reference_alignment_yaw_w[:, None].expand(-1, raw.shape[1], -1)
     return quat_mul(yaw, raw)
 
-  def _raw_body_lin_vel_w(self) -> torch.Tensor:
+  def _frame_body_lin_vel_w(self) -> torch.Tensor:
     raw = self._motion_body_lin_vel_w()
     if not self.cfg.align_reference_to_robot_each_step:
       return raw
     yaw = self._reference_alignment_yaw_w[:, None].expand(-1, raw.shape[1], -1)
     return quat_apply(yaw, raw)
 
-  def _raw_body_ang_vel_w(self) -> torch.Tensor:
+  def _frame_body_ang_vel_w(self) -> torch.Tensor:
     raw = self._motion_body_ang_vel_w()
     if not self.cfg.align_reference_to_robot_each_step:
       return raw
     yaw = self._reference_alignment_yaw_w[:, None].expand(-1, raw.shape[1], -1)
     return quat_apply(yaw, raw)
 
+  # The RAW reference the rest of the command consumes: the current frame,
+  # blended towards a frozen frame while an escape move is entered or left.
+  def _raw_body_pos_w(self) -> torch.Tensor:
+    return self._escape_blend_bodies(self._frame_body_pos_w(), "pos")
+
+  def _raw_body_quat_w(self) -> torch.Tensor:
+    return self._escape_blend_bodies(self._frame_body_quat_w(), "quat")
+
+  def _raw_body_lin_vel_w(self) -> torch.Tensor:
+    return self._escape_blend_bodies(self._frame_body_lin_vel_w(), "lin_vel")
+
+  def _raw_body_ang_vel_w(self) -> torch.Tensor:
+    return self._escape_blend_bodies(self._frame_body_ang_vel_w(), "ang_vel")
+
   def _raw_joint_pos(self) -> torch.Tensor:
-    return MotionCommand.joint_pos.fget(self)  # type: ignore[union-attr]
+    return self._escape_blend_joints(
+      MotionCommand.joint_pos.fget(self),  # type: ignore[union-attr]
+      self.motion.joint_pos,
+    )
 
   def _raw_joint_vel(self) -> torch.Tensor:
-    return MotionCommand.joint_vel.fget(self)  # type: ignore[union-attr]
+    return self._escape_blend_joints(
+      MotionCommand.joint_vel.fget(self),  # type: ignore[union-attr]
+      self.motion.joint_vel,
+    )
+
+  # ---- escape moves -------------------------------------------------------
+
+  def _escape_enabled(self) -> bool:
+    return getattr(self, "_escape_table", None) is not None
+
+  def _alignment_targets(self) -> tuple[torch.Tensor, torch.Tensor]:
+    """Live robot root position and anchor orientation used for alignment."""
+    return self.robot_body_pos_w[:, 0], self.robot_anchor_quat_w
+
+  def _build_escape_table(self, cfg: EscapeMoveCfg) -> EscapeMoveTable:
+    if not self._has_clip_library():
+      raise ValueError("escape moves need a clip-library manifest as motion_file")
+    assert isinstance(self.motion, LibraryMotionLoader)
+    return EscapeMoveTable.from_index(
+      load_escape_move_index(cfg.index_file),
+      self.motion.source_paths,
+      self.motion.clip_start_idx,
+      self.motion.clip_num_frames,
+      self.motion.joint_pos,
+      self.device,
+    )
+
+  def _init_escape_moves(self, table: EscapeMoveTable) -> None:
+    cfg = self.cfg.escape_moves
+    assert cfg is not None
+    step_dt = float(self._env.step_dt)
+    n, dev = self.num_envs, self.device
+    self._escape_table = table
+    self._escape_blend_steps = max(1, int(round(cfg.blend_s / step_dt)))
+    self._escape_cooldown_total = int(round(cfg.cooldown_s / step_dt))
+    self._last_intervention_w = torch.zeros(n, 2, device=dev)
+    self._actor_escape_hint_b = torch.zeros(n, 2, device=dev)
+    long = dict(dtype=torch.long, device=dev)
+    self._escape_mode = torch.zeros(n, **long)
+    self._escape_trigger_count = torch.zeros(n, **long)
+    self._escape_cooldown_steps = torch.zeros(n, **long)
+    self._escape_saved_start = torch.zeros(n, **long)
+    self._escape_saved_end = torch.zeros(n, **long)
+    self._escape_saved_frame = torch.zeros(n, **long)
+    self._escape_exit_frame = torch.zeros(n, **long)
+    self._escape_blend_frame = torch.full((n,), -1, **long)
+    self._escape_blend_steps_left = torch.zeros(n, **long)
+    for name in (
+      "escape_move_active",
+      "escape_move_count",
+      "escape_intervention_speed_mps",
+    ):
+      self.metrics[name] = torch.zeros(n, device=dev)
+
+  def _reset_escape_state(self, env_ids: torch.Tensor) -> None:
+    self._escape_mode[env_ids] = 0
+    self._escape_trigger_count[env_ids] = 0
+    self._escape_cooldown_steps[env_ids] = 0
+    self._escape_blend_frame[env_ids] = -1
+    self._escape_blend_steps_left[env_ids] = 0
+    self._last_intervention_w[env_ids] = 0.0
+    self._actor_escape_hint_b[env_ids] = 0.0
+    for name in (
+      "escape_move_active",
+      "escape_move_count",
+      "escape_intervention_speed_mps",
+    ):
+      self.metrics[name][env_ids] = 0.0
+
+  def set_actor_escape_hint(self, hint_b: torch.Tensor) -> None:
+    """Deployment trigger: the actor's planar prediction (robot frame, m/s)."""
+    self._actor_escape_hint_b.copy_(hint_b.to(self._actor_escape_hint_b))
+
+  def _update_escape_moves(self, env_ids: torch.Tensor) -> None:
+    """Per-step escape-move state machine (see escape_moves.py docstring)."""
+    cfg = self.cfg.escape_moves
+    assert cfg is not None
+    table = self._escape_table
+    ids = env_ids
+    # Blend countdown and cooldown.
+    blending = self._escape_blend_frame[ids] >= 0
+    left = (self._escape_blend_steps_left[ids] - blending.long()).clamp_min(0)
+    self._escape_blend_steps_left[ids] = left
+    self._escape_blend_frame[ids] = torch.where(
+      blending & (left <= 0), torch.full_like(left, -1), self._escape_blend_frame[ids]
+    )
+    self._escape_cooldown_steps[ids] = (self._escape_cooldown_steps[ids] - 1).clamp_min(
+      0
+    )
+    # Resume the interrupted clip when the move reaches its exit frame.
+    exit_now = (self._escape_mode[ids] == 1) & (
+      self.time_steps[ids] >= self._escape_exit_frame[ids]
+    )
+    if bool(exit_now.any()):
+      r = ids[exit_now]
+      self._escape_blend_frame[r] = self.time_steps[r] - 1
+      self._escape_blend_steps_left[r] = self._escape_blend_steps
+      self._clip_start[r] = self._escape_saved_start[r]
+      self._clip_end[r] = self._escape_saved_end[r]
+      self.time_steps[r] = self._escape_saved_frame[r]
+      self._escape_mode[r] = 0
+      self._escape_cooldown_steps[r] = self._escape_cooldown_total
+    # Trigger on a sustained planar correction (teacher) or the actor's hint.
+    if cfg.trigger_source == "actor":
+      vec_b = self._actor_escape_hint_b
+    else:
+      vec_b = body_frame_planar(self._last_intervention_w, self._alignment_targets()[1])
+    speed = torch.linalg.vector_norm(vec_b, dim=-1)
+    nominal = self._escape_mode[ids] == 0
+    count = update_trigger_count(
+      self._escape_trigger_count[ids], speed[ids], cfg.trigger_speed_mps
+    )
+    count = torch.where(nominal, count, torch.zeros_like(count))
+    ready = (
+      nominal & (count >= cfg.trigger_steps) & (self._escape_cooldown_steps[ids] == 0)
+    )
+    self._escape_trigger_count[ids] = count
+    if bool(ready.any()):
+      r = ids[ready]
+      chosen = select_escape_moves(
+        table, vec_b[r], self.motion.joint_pos[self.time_steps[r]], cfg
+      )
+      self._escape_trigger_count[r] = 0
+      ok = chosen >= 0
+      if bool(ok.any()):
+        rr, c = r[ok], chosen[ok]
+        self._escape_saved_start[rr] = self._clip_start[rr]
+        self._escape_saved_end[rr] = self._clip_end[rr]
+        self._escape_saved_frame[rr] = self.time_steps[rr]
+        self._escape_blend_frame[rr] = self.time_steps[rr]
+        self._escape_blend_steps_left[rr] = self._escape_blend_steps
+        self._clip_start[rr] = table.clip_starts[c]
+        self._clip_end[rr] = table.clip_ends[c]
+        self.time_steps[rr] = table.entry_frames[c]
+        self._escape_exit_frame[rr] = table.exit_frames[c]
+        self._escape_mode[rr] = 1
+        self.metrics["escape_move_count"][rr] += 1.0
+    active = (self._escape_mode[ids] == 1).to(torch.float32)
+    self.metrics["escape_move_active"][ids] = active
+    self.metrics["escape_intervention_speed_mps"][ids] = (
+      torch.linalg.vector_norm(self._last_intervention_w[ids], dim=-1) * active
+    )
+
+  def _aligned_frame_cloud(self, frames: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Body cloud of arbitrary global frames, glued to the live robot pose."""
+    pos = self.motion.body_pos_w[frames] + self._env.scene.env_origins[:, None, :]
+    quat = self.motion.body_quat_w[frames]
+    lin = self.motion.body_lin_vel_w[frames]
+    ang = self.motion.body_ang_vel_w[frames]
+    if self.cfg.align_reference_to_robot_each_step:
+      robot_root_w, robot_anchor_quat_w = self._alignment_targets()
+      yaw_delta_w, root_xy_w = _planar_reference_alignment(
+        quat[:, self.motion_anchor_body_index], robot_root_w, robot_anchor_quat_w
+      )
+      pos = _apply_planar_reference_alignment(pos, pos[:, 0], root_xy_w, yaw_delta_w)
+      yaw = yaw_delta_w[:, None].expand(-1, quat.shape[1], -1)
+      quat = quat_mul(yaw, quat)
+      lin = quat_apply(yaw, lin)
+      ang = quat_apply(yaw, ang)
+    return {"pos": pos, "quat": quat, "lin_vel": lin, "ang_vel": ang}
+
+  def _escape_blend_mask(self) -> torch.Tensor | None:
+    if not self._escape_enabled():
+      return None
+    mask = self._escape_blend_frame >= 0
+    return mask if bool(mask.any()) else None
+
+  def _escape_blend_bodies(self, current: torch.Tensor, key: str) -> torch.Tensor:
+    mask = self._escape_blend_mask()
+    if mask is None:
+      return current
+    other = self._aligned_frame_cloud(self._escape_blend_frame.clamp_min(0))[key]
+    alpha = blend_alpha(self._escape_blend_steps_left, self._escape_blend_steps)
+    alpha = torch.where(mask, alpha, torch.ones_like(alpha))[:, None, None]
+    if key == "quat":
+      return nlerp(other, current, alpha)
+    return other + alpha * (current - other)
+
+  def _escape_blend_joints(
+    self, current: torch.Tensor, flat: torch.Tensor
+  ) -> torch.Tensor:
+    mask = self._escape_blend_mask()
+    if mask is None:
+      return current
+    other = flat[self._escape_blend_frame.clamp_min(0)]
+    alpha = blend_alpha(self._escape_blend_steps_left, self._escape_blend_steps)
+    alpha = torch.where(mask, alpha, torch.ones_like(alpha))[:, None]
+    return other + alpha * (current - other)
 
   @property
   def command(self) -> torch.Tensor:
@@ -1161,6 +1382,8 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
     # motion by ``time_steps``, so alignment and filter state initialize at
     # the sampled frame. Reset-state randomization is deliberately not
     # applied (exact reference write, as before).
+    if self._escape_enabled():
+      self._reset_escape_state(env_ids)
     self._sample_start_time_steps(env_ids)
     self._update_reference_alignment(env_ids)
     raw_root_pos = self._raw_body_pos_w()[env_ids, 0]
@@ -1534,6 +1757,8 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
       return
 
     wrapped = self._advance_time_steps(replay_env_ids)
+    if self._escape_enabled():
+      self._update_escape_moves(replay_env_ids)
     self._update_reference_alignment(replay_env_ids)
     raw_root_pos = self._raw_body_pos_w()[:, 0]
     raw_root_velocity = self._raw_body_lin_vel_w()[:, 0]
@@ -1617,6 +1842,8 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
     self._filtered_root_velocity_xy_w[replay_env_ids] = result.velocity_w[
       replay_env_ids
     ]
+    if self._escape_enabled():
+      self._last_intervention_w[replay_env_ids] = result.intervention_w[replay_env_ids]
     filtered_xy_w, residual_xy_w = advance_filtered_root_xy(
       pre_filter_xy_w=pre_filter_root_xy_w,
       raw_root_xy_w=raw_root_pos[:, :2],
@@ -1763,6 +1990,8 @@ class PlanarFilteredReplayMotionCommand(KinematicReplayMotionCommand):
     self._filtered_joint_vel[replay_env_ids] = raw_joint_vel[replay_env_ids]
     self._joint_position_residual[replay_env_ids] = 0.0
     self._posture_hold_remaining_s[replay_env_ids] = 0.0
+    if self._escape_enabled():
+      self._last_intervention_w[replay_env_ids] = 0.0
     if self._propagate_targets:
       # Filtered joints equal raw joints, so this zeroes the cached offsets
       # (and their finite-difference velocities) through the normal path.
@@ -1901,6 +2130,10 @@ class PlanarFilteredReplayMotionCommandCfg(KinematicReplayMotionCommandCfg):
   # the arm body-target offsets vanish. Rewards, terminations and
   # observations keep reading the same (now unfiltered) properties.
   disable_filters: bool = False
+  # Escape moves (2026-09-10): answer a sustained planar CBF correction by
+  # switching the RAW clip to an indexed travelling ballet move aligned with
+  # the escape direction, then resume the interrupted clip. ``None`` = off.
+  escape_moves: EscapeMoveCfg | None = None
   planar_filter: PlanarCbfReferenceFilterCfg = field(
     default_factory=PlanarCbfReferenceFilterCfg
   )
