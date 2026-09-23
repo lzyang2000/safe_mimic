@@ -461,15 +461,16 @@ The control design and camera/LiDAR trade study are in
 
 ## Full G1 mimic motion library
 
-The BONES-SEED Unitree G1 source data is preserved locally in both forms:
-
-- `artifacts/bones-seed/g1.tar.gz`: the original 23,499,973,647-byte archive.
-- `artifacts/bones-seed/g1/csv/`: all 142,220 extracted G1 CSV trajectories
-  (about 49 GB).
-
-Both paths are ignored by Git. Do not delete the archive after extraction: it
-is the immutable source copy, while the CSV directory is the convenient input
-to filtering and conversion.
+The BONES-SEED Unitree G1 source data lives once on this machine, at
+`~/twist2/seed/g1/csv/` (all 142,220 extracted G1 CSV trajectories, about
+49 GB). `artifacts/bones-seed/g1` is a symlink to that directory, so the
+paths below still resolve. The original `g1.tar.gz` and `soma_uniform.tar.gz`
+archives and the Git LFS object cache were removed to save space (2026-09-19
+and 2026-09-22). Only the 3,000 SOMA BVH clips named in
+`datasets/walk_punch_kick_1000/manifest.jsonl` remain extracted under
+`artifacts/bones-seed/soma_uniform/`; re-download the archives from
+`https://huggingface.co/datasets/bones-studio/seed` if a wider motion
+selection is ever needed. `artifacts/bones-seed/` is ignored by Git.
 
 Build the deterministic full-corpus filter manifests with:
 
